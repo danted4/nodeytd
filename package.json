@@ -1,0 +1,19 @@
+{
+  "name": "ytd",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node ytd.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@distube/ytdl-core": "^4.14.4",
+    "cli-progress": "^3.12.0",
+    "inquirer": "^10.1.8"
+  },
+  "type": "module"
+}
