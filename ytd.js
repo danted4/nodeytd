@@ -8,6 +8,11 @@ import cliProgress from 'cli-progress';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * getVideoInfo - gets info about a youtube video
+ * @param {string} url - video url
+ * @returns {void}
+ */
 async function getVideoInfo(url) {
     try {
         const info = await ytdl.getInfo(url);
@@ -18,6 +23,12 @@ async function getVideoInfo(url) {
     }
 }
 
+/**
+ * downloadVideo - handles downloading for selected video with progress indicator
+ * @param {string} url - video url
+ * @param {*} format - selected format
+ * @returns {void}
+ */
 async function downloadVideo(url, format) {
     try {
         const info = await getVideoInfo(url);
@@ -87,6 +98,10 @@ async function downloadVideo(url, format) {
     }
 }
 
+/**
+ * main - main function
+ * @returns {void}
+ */
 async function main() {
     const urlQuestion = {
         type: 'input',
