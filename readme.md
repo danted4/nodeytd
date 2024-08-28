@@ -1,4 +1,4 @@
-# nodeWT
+# nodeYTD
 YTD Node Client wrapper on @distube/ytdl-core@latest.
 
 ## STEPS
