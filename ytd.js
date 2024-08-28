@@ -119,14 +119,14 @@ async function main() {
     }));
 
     if (highestQualityAudio) {
-        choices.push({
+        choices.unshift({
             name: `Highest Quality Audio (${highestQualityAudio.audioBitrate}kbps)`,
             value: highestQualityAudio.itag
         });
     }
 
     if (highestQualityVideo) {
-        choices.push({
+        choices.unshift({
             name: `Highest Quality Video (${highestQualityVideo.qualityLabel})`,
             value: highestQualityVideo.itag
         });
