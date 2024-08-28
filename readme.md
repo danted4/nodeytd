@@ -1,5 +1,5 @@
 # nodeYTD
-YTD Node Client wrapper on @distube/ytdl-core@latest.
+YTD Node Client wrapper on @distube/ytdl-core
 
 ## STEPS
 
