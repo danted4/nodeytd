@@ -3,15 +3,20 @@ import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import ffmpeg from 'fluent-ffmpeg';
 import cliProgress from 'cli-progress';
+import util from 'util';
+import { pipeline } from 'stream';
+import { promisify } from 'util';
 
+const pipelinePromise = promisify(pipeline);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * getVideoInfo - gets info about a youtube video
- * @param {string} url - video url
- * @returns {void}
+ * getVideoInfo - gets info about a YouTube video
+ * @param {string} url - video URL
+ * @returns {Promise<object>}
  */
 async function getVideoInfo(url) {
     try {
@@ -24,83 +29,98 @@ async function getVideoInfo(url) {
 }
 
 /**
- * downloadVideo - handles downloading for selected video with progress indicator
- * @param {string} url - video url
+ * downloadStream - downloads a stream with a progress indicator
+ * @param {string} url - video or audio URL
  * @param {*} format - selected format
- * @returns {void}
+ * @param {string} filePath - output file path
+ * @returns {Promise<void>}
  */
-async function downloadVideo(url, format) {
-    try {
-        const info = await getVideoInfo(url);
-        const formatToDownload = ytdl.chooseFormat(info.formats, { quality: format });
-
-        if (!formatToDownload) {
-            console.log('Selected format not available.');
-            return;
-        }
-
-        const padZero = (num) => num.toString().padStart(2, '0');
-        const dt = new Date();
-        
-        const year = dt.getFullYear();
-        const month = padZero(dt.getMonth() + 1);
-        const day = padZero(dt.getDate());
-        const hours = padZero(dt.getHours());
-        const minutes = padZero(dt.getMinutes());
-        const seconds = padZero(dt.getSeconds());
-        const output = path.join(__dirname, `downloads/${info.videoDetails.title}-${year}-${month}-${day}-${hours}-${minutes}-${seconds}.${formatToDownload.container}`);
-        
-        console.log(`Downloading to ${output}...`);
-        const fileSize = parseInt(formatToDownload.contentLength, 10) || 0;
-        
+async function downloadStream(url, format, filePath) {
+    return new Promise((resolve, reject) => {
         const progressBar = new cliProgress.SingleBar({
-            format: 'Downloading |{bar}| {percentage}% || {value}/{total} MB || {eta}s',
+            format: `Downloading |{bar}| {percentage}% || {value}/{total} MB || {eta}s`,
             barCompleteChar: '\u2588',
             barIncompleteChar: '\u2591',
             hideCursor: true,
         }, cliProgress.Presets.shades_classic);
 
-        if (fileSize > 0) {
-            progressBar.start(fileSize, 0);
-        } else {
-            console.log('File size not available! Downloading...');
-        }
-
-        const fileStream = fs.createWriteStream(output);
-        const videoStream = ytdl(url, { format: formatToDownload });
+        const fileStream = fs.createWriteStream(filePath);
+        const videoStream = ytdl(url, { format: format });
 
         videoStream
             .on('data', chunk => {
-                if (fileSize > 0) {
+                if (format.contentLength) {
                     progressBar.increment(chunk.length);
                 }
             })
             .on('end', () => {
-                if (fileSize > 0) {
-                    progressBar.stop();
-                }
-                console.log('Download complete!');
+                progressBar.stop();
+                resolve();
             })
             .on('error', error => {
-                console.error('Error downloading video:', error);
-                if (fileSize > 0) {
-                    progressBar.stop();
-                }
+                progressBar.stop();
+                reject(error);
             })
             .pipe(fileStream);
 
-        fileStream.on('finish', () => {
-            console.log('File write complete!');
-        });
+        if (format.contentLength) {
+            progressBar.start(parseInt(format.contentLength, 10), 0);
+        }
+    });
+}
 
-    } catch (e) {
-        console.error(`Error: ${e}`);
-    }
+/**
+ * mergeFiles - merges video and audio files using ffmpeg with progress
+ * @param {string} videoPath - path to video file
+ * @param {string} audioPath - path to audio file
+ * @param {string} outputPath - path to output file
+ * @returns {Promise<void>}
+ */
+async function mergeFiles(videoPath, audioPath, outputPath) {
+    return new Promise((resolve, reject) => {
+        const progressBar = new cliProgress.SingleBar({
+            format: 'Merging |{bar}| {percentage}% || {value}/{total} MB || {eta}s',
+            barCompleteChar: '\u2588',
+            barIncompleteChar: '\u2591',
+            hideCursor: true,
+        }, cliProgress.Presets.shades_classic);
+
+        // Get the file size of the video and audio files to estimate progress
+        const videoSize = fs.statSync(videoPath).size;
+        const audioSize = fs.statSync(audioPath).size;
+        const totalSize = videoSize + audioSize;
+
+        let processedSize = 0;
+
+        ffmpeg()
+            .input(videoPath)
+            .input(audioPath)
+            .audioCodec('aac')
+            .videoCodec('copy')
+            .output(outputPath)
+            .on('progress', (progress) => {
+                const processed = (progress.percent / 100) * totalSize;
+                processedSize = Math.min(processed, totalSize);
+                progressBar.update(processedSize);
+            })
+            .on('end', () => {
+                progressBar.stop();
+                fs.unlinkSync(videoPath);
+                fs.unlinkSync(audioPath);
+                console.log(`Merged to ${outputPath}`);
+                resolve();
+            })
+            .on('error', (err) => {
+                progressBar.stop();
+                reject(err);
+            })
+            .run();
+    });
 }
 
 /**
  * main - main function
- * @returns {void}
+ * @returns {Promise<void>}
  */
 async function main() {
     const urlQuestion = {
@@ -112,50 +132,61 @@ async function main() {
 
     const { url } = await inquirer.prompt(urlQuestion);
     const info = await getVideoInfo(url);
-    
-    const formats = info.formats
-        .filter(format => format.hasAudio)
-        .map(format => ({
-            name: format.qualityLabel ? `${format.qualityLabel} - ${format.container}` : `${format.itag} - ${format.container}`,
-            value: format.itag
-        }));
+    const mp4 = 'mp4';
+    const videoFormats = info.formats.filter(format => format.hasVideo && format.container === mp4);
+    const audioFormats = info.formats.filter(format => format.hasAudio && format.container === mp4);
 
-    if (formats.length === 0) {
-        console.log('No downloadable formats with audio found.');
-        return;
-    }
-
-    const highestQualityAudio = ytdl.chooseFormat(info.formats.filter(f => f.hasAudio && !f.hasVideo), { quality: 'highestaudio' });
-    const highestQualityVideo = ytdl.chooseFormat(info.formats.filter(f => f.hasVideo && f.hasAudio), { quality: 'highestvideo' });
-
-    const choices = formats.map(format => ({
-        name: format.name,
-        value: format.value
+    const videoChoices = videoFormats.map(format => ({
+        name: format.qualityLabel ? `${format.qualityLabel} - ${format.container}` : `${format.itag} - ${format.container}`,
+        value: format.itag
     }));
 
-    if (highestQualityAudio) {
-        choices.unshift({
-            name: `Highest Quality Audio (${highestQualityAudio.audioBitrate}kbps)`,
-            value: highestQualityAudio.itag
-        });
-    }
+    const audioChoices = audioFormats.map(format => ({
+        name: format.audioBitrate ? `${format.audioBitrate}kbps - ${format.container}` : `${format.itag} - ${format.container}`,
+        value: format.itag
+    }));
 
-    if (highestQualityVideo) {
-        choices.unshift({
-            name: `Highest Quality Video (${highestQualityVideo.qualityLabel})`,
-            value: highestQualityVideo.itag
-        });
-    }
-
-    const resolutionQuestion = {
+    const videoQuestion = {
         type: 'list',
-        name: 'format',
-        message: 'Choose the resolution quality with audio or select an option:',
-        choices: choices
+        name: 'videoFormat',
+        message: 'Choose the video resolution:',
+        choices: videoChoices
     };
-    const { format } = await inquirer.prompt(resolutionQuestion);
-    
-    await downloadVideo(url, format);
+
+    const audioQuestion = {
+        type: 'list',
+        name: 'audioFormat',
+        message: 'Choose the audio quality:',
+        choices: audioChoices
+    };
+
+    const { videoFormat } = await inquirer.prompt(videoQuestion);
+    const { audioFormat } = await inquirer.prompt(audioQuestion);
+
+    const selectedVideoFormat = info.formats.find(f => f.itag === videoFormat);
+    const selectedAudioFormat = info.formats.find(f => f.itag === audioFormat);
+
+    if (selectedVideoFormat && selectedAudioFormat) {
+        const dt = new Date();
+        const padZero = (num) => num.toString().padStart(2, '0');
+        const year = dt.getFullYear();
+        const month = padZero(dt.getMonth() + 1);
+        const day = padZero(dt.getDate());
+        const hours = padZero(dt.getHours());
+        const minutes = padZero(dt.getMinutes());
+        const seconds = padZero(dt.getSeconds());
+        const sanitizedTitle = info.videoDetails.title.replace(/[^a-zA-Z0-9]/g, '-');
+
+        const videoPath = path.join(__dirname, `downloads/${sanitizedTitle}-${year}-${month}-${day}-${hours}-${minutes}-${seconds}-video.${selectedVideoFormat.container}`);
+        const audioPath = path.join(__dirname, `downloads/${sanitizedTitle}-${year}-${month}-${day}-${hours}-${minutes}-${seconds}-audio.${selectedAudioFormat.container}`);
+        const outputPath = path.join(__dirname, `downloads/${sanitizedTitle}-${year}-${month}-${day}-${hours}-${minutes}-${seconds}.${selectedVideoFormat.container}`);
+
+        await downloadStream(url, selectedVideoFormat, videoPath);
+        await downloadStream(url, selectedAudioFormat, audioPath);
+        await mergeFiles(videoPath, audioPath, outputPath);
+    } else {
+        console.log('Selected formats not available.');
+    }
 }
 
 main().catch(err => {
