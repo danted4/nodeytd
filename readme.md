@@ -1,7 +1,9 @@
 # nodeYTD
 YTD Node Client wrapper on @distube/ytdl-core
 
-### Node Version: `lts/jod`
+### Node Version: `26+` (or `22.22.2+` on 22.x, `24.15.0+` on 24.x)
+
+Required by `@distube/ytdl-core` v5.
 
 ## STEPS
 
@@ -35,7 +37,7 @@ YTD Node Client wrapper on @distube/ytdl-core
 
 ## Requirements
 
-- Node.js
+- Node.js 26+ (or 22.22.2+ / 24.15.0+)
 - ffmpeg (must be installed and available in PATH)
 
 ## Usage
@@ -46,3 +48,7 @@ Run `npm start` and follow the prompts:
 2. Choose download type (audio, video, both, or best available)
 3. Select quality/format
 4. Find your file in the `downloads` folder
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=danted4/nodeytd&type=Date)](https://star-history.com/#danted4/nodeytd&Date)
