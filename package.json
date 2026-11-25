@@ -11,7 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@distube/ytdl-core": "^4.16.12",
+    "@distube/ytdl-core": "^5.2.1",
     "cli-progress": "^3.12.0",
     "fluent-ffmpeg": "^2.1.3",
     "inquirer": "^12.9.2"

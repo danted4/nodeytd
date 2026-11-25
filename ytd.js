@@ -1,4 +1,4 @@
-import ytdl from '@distube/ytdl-core';
+import { Ytdl, parseVideoId } from '@distube/ytdl-core';
 import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
@@ -9,6 +9,7 @@ import util from 'util';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
 
+const yt = new Ytdl();
 const pipelinePromise = promisify(pipeline);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +42,7 @@ function calcDuration(start, end) {
  */
 async function getVideoInfo(url) {
     try {
-        const info = await ytdl.getInfo(url);
+        const info = await yt.getInfo(url);
         return info;
     } catch (error) {
         console.error('Error fetching video info:', error);
@@ -51,12 +52,12 @@ async function getVideoInfo(url) {
 
 /**
  * downloadStream - downloads a stream with a progress indicator
- * @param {string} url - video or audio URL
+ * @param {object} info - video info from getInfo
  * @param {*} format - selected format
  * @param {string} filePath - output file path
  * @returns {Promise<void>}
  */
-async function downloadStream(url, format, filePath) {
+async function downloadStream(info, format, filePath) {
     return new Promise((resolve, reject) => {
         const progressBar = new cliProgress.SingleBar({
             format: `Downloading |{bar}| {percentage}% || {value}/{total} MB || {eta}s`,
@@ -66,7 +67,7 @@ async function downloadStream(url, format, filePath) {
         }, cliProgress.Presets.shades_classic);
 
         const fileStream = fs.createWriteStream(filePath);
-        const videoStream = ytdl(url, { format: format });
+        const videoStream = yt.download(info, { format });
 
         videoStream
             .on('data', chunk => {
@@ -148,7 +149,7 @@ async function main() {
         type: 'input',
         name: 'url',
         message: 'Enter the YouTube video URL:',
-        validate: value => ytdl.validateURL(value) ? true : 'Invalid URL!'
+        validate: value => parseVideoId(value) ? true : 'Invalid URL!'
     };
 
     const { url } = await inquirer.prompt(urlQuestion);
@@ -211,7 +212,7 @@ async function main() {
             baseName = baseName.slice(0, -4);
         }
         const mp3Path = path.join(__dirname, 'downloads', `${baseName || defaultMp3Name.slice(0, -4)}.mp3`);
-        await downloadStream(url, selectedAudioFormat, audioPath);
+        await downloadStream(info, selectedAudioFormat, audioPath);
         const { trimStart, trimEnd } = await inquirer.prompt([
             {
                 type: 'input',
@@ -263,7 +264,7 @@ async function main() {
             baseName = baseName.slice(0, -(selectedVideoFormat.container.length + 1));
         }
         const videoPath = path.join(__dirname, 'downloads', `${baseName || defaultVideoName.replace(/\.[^.]+$/, '')}.${selectedVideoFormat.container}`);
-        await downloadStream(url, selectedVideoFormat, videoPath);
+        await downloadStream(info, selectedVideoFormat, videoPath);
         const { trimStart, trimEnd } = await inquirer.prompt([
             {
                 type: 'input',
@@ -348,8 +349,8 @@ async function main() {
             baseName = baseName.slice(0, -4);
         }
         const outputPath = path.join(__dirname, 'downloads', `${baseName || defaultOutputName.slice(0, -4)}.mp4`);
-        await downloadStream(url, selectedVideoFormat, videoPath);
-        await downloadStream(url, selectedAudioFormat, audioPath);
+        await downloadStream(info, selectedVideoFormat, videoPath);
+        await downloadStream(info, selectedAudioFormat, audioPath);
         await mergeFiles(videoPath, audioPath, outputPath);
         const { trimStart, trimEnd } = await inquirer.prompt([
             {
@@ -411,7 +412,7 @@ async function main() {
             baseName = baseName.slice(0, -(selectedAVFormat.container.length + 1));
         }
         const avPath = path.join(__dirname, 'downloads', `${baseName || defaultAVName.replace(/\.[^.]+$/, '')}.${selectedAVFormat.container}`);
-        await downloadStream(url, selectedAVFormat, avPath);
+        await downloadStream(info, selectedAVFormat, avPath);
         const { trimStart, trimEnd } = await inquirer.prompt([
             {
                 type: 'input',
@@ -444,16 +445,6 @@ async function main() {
         } else {
             console.log(`Saved as ${avPath}`);
         }
-// Helper to calculate duration from start/end in hh:mm:ss
-function calcDuration(start, end) {
-    if (!end) return undefined;
-    if (!start) start = '00:00:00';
-    const toSeconds = t => {
-        const [h, m, s] = t.split(':').map(Number);
-        return h * 3600 + m * 60 + s;
-    };
-    return toSeconds(end) - toSeconds(start);
-}
     }
 }
 
