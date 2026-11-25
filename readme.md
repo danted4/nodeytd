@@ -1,49 +1,91 @@
-# nodeYTD
-YTD Node Client wrapper on @distube/ytdl-core
+# rustYTD
+
+Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org). Paste a link, see a preview, pick what you want, and follow the download queue.
+
+Windows, macOS and Linux.
 
 ## Prerequisite
 
-- Node.js `26+` (or `22.22.2+` on 22.x, `24.15.0+` on 24.x), required by `@distube/ytdl-core` v5
-- ffmpeg (must be installed and available in PATH)
+- **Nothing to install on Windows and Linux.** On first run ytd downloads yt-dlp, ffmpeg and deno (the JavaScript runtime yt-dlp uses for YouTube) into its own folder. Each file is checked against its publisher's SHA-256 checksums.
+- **macOS:** ffmpeg is not auto-installed. Run `brew install ffmpeg`. yt-dlp and deno are fetched automatically.
+- **Building from source:** Rust 1.85 or newer.
 
-## STEPS
+## Download
 
-### 1. Install ffmpeg from https://ffmpeg.org/download.html and add the bin path in environment variables
-### 2. Download this code on your local machine.
-### 3. Open a command prompt in the `ytd` folder.
-### 4. RUN `npm install`
-### 5. RUN `npm start`
-### 6. A prompt will ask you for the YouTube URL.
-### 7. Paste it, hit enter.
-### 8. Choose what you want to download:
-	- Audio Only (mp3)
-	- Video Only
-	- Both (merged mp4)
-	- Single file (best available, e.g. webm/mp4)
-### 9. Select the desired quality/format from the list.
-### 10. Optionally, enter trim start/end times for the output file. You can use flexible formats:
-	- `3` or `03` for 3 seconds
-	- `3:00` for 3 minutes
-	- `1:02:03` for 1 hour, 2 minutes, 3 seconds
-	- Leave blank for full file
-### 11. Your file will be available in the `downloads` sub-directory of this project.
+Get the build for your system from the [latest release](https://github.com/danted4/nodeytd/releases/latest):
 
-## Features
+| System | GUI | CLI |
+|---|---|---|
+| Windows (x64) | `ytd-gui-x86_64-pc-windows-msvc.exe` | `ytd-x86_64-pc-windows-msvc.exe` |
+| macOS (Apple silicon) | `ytd-gui-aarch64-apple-darwin.app.zip` | `ytd-aarch64-apple-darwin` |
+| macOS (Intel) | `ytd-gui-x86_64-apple-darwin.app.zip` | `ytd-x86_64-apple-darwin` |
+| Linux (x64) | `ytd-gui-x86_64-unknown-linux-gnu` | `ytd-x86_64-unknown-linux-gnu` |
 
-- Download audio only and convert to mp3
-- Download video only (no audio)
-- Download both video and audio, merged to mp4 (only compatible formats shown)
-- Download best available single file (video+audio, e.g. webm/mp4)
-- Optionally trim output file with flexible time input
+`SHA256SUMS` in each release lists the checksum of every file. The builds are not code-signed, so Windows SmartScreen and macOS Gatekeeper ask for confirmation the first time.
 
-## Usage
+## GUI
 
-Run `npm start` and follow the prompts:
+1. Paste a video link and press Enter (or click **fetch**).
+2. Check the preview: thumbnail, title, channel and duration.
+3. Choose what to download:
+   - **MP4**: video and audio merged into an mp4 (recommended)
+   - **MP3**: audio only, converted to mp3
+   - **VIDEO**: video only, no audio
+   - **FILE**: a single stream that already has both (often lower quality)
+4. Pick the quality, rename the file if you like, and optionally set trim start/end times.
+5. Click **add to queue**.
 
-1. Enter the YouTube video URL
-2. Choose download type (audio, video, both, or best available)
-3. Select quality/format
-4. Find your file in the `downloads` folder
+Queue:
+
+- Downloads run in parallel up to the limit in settings (default 2).
+- **pause** keeps the partial file and **resume** continues from it. **stop** cancels and deletes the partial files.
+- Click a title to open its folder. The list is saved between runs.
+
+Top bar:
+
+- A tick means the tools are ready.
+- **auto-update** (off by default) keeps ytd and its tools current from GitHub Releases. App updates take effect the next time you start ytd. On macOS a new version is announced instead of installed.
+- The cog opens settings: download folder, downloads at once, colour theme, tool versions and **update tools**.
+
+## CLI
+
+```text
+ytd                      interactive prompts (URL, type, quality, name, trim)
+ytd get <url> [options]  download without prompts
+ytd formats <url>        list the formats a video offers
+ytd tools [status|install|update]
+```
+
+`ytd get` options:
+
+| Option | Meaning |
+|---|---|
+| `--kind merged\|audio\|video\|single` | what to download (default `merged`) |
+| `--video <id\|1080p\|best>` | video stream (default: best) |
+| `--audio <id\|best>` | audio stream (default: best) |
+| `--name <file>` | output name, extension optional |
+| `--start <t>` `--end <t>` | trim, e.g. `3`, `3:00` or `1:02:03` |
+| `--dir <folder>` | where to save |
+
+Example: `ytd get https://www.youtube.com/watch?v=jNQXAC9IVRw --kind audio --start 3 --end 0:10`
+
+## Where things go
+
+- **Downloads:** `Downloads/rustYTD` (change it in settings).
+- **Settings, job list and tools:**
+  - Windows: `%APPDATA%\ytd`
+  - macOS: `~/Library/Application Support/ytd`
+  - Linux: `~/.config/ytd`
+
+## Build from source
+
+```bash
+cargo run                                  # CLI
+cargo run --features gui --bin ytd-gui     # GUI
+cargo test --all-features
+```
+
+On Linux the GUI needs `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`.
 
 ## Star History
 
