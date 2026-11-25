@@ -1,9 +1,10 @@
 # nodeYTD
 YTD Node Client wrapper on @distube/ytdl-core
 
-### Node Version: `26+` (or `22.22.2+` on 22.x, `24.15.0+` on 24.x)
+## Prerequisite
 
-Required by `@distube/ytdl-core` v5.
+- Node.js `26+` (or `22.22.2+` on 22.x, `24.15.0+` on 24.x), required by `@distube/ytdl-core` v5
+- ffmpeg (must be installed and available in PATH)
 
 ## STEPS
 
@@ -34,11 +35,6 @@ Required by `@distube/ytdl-core` v5.
 - Download both video and audio, merged to mp4 (only compatible formats shown)
 - Download best available single file (video+audio, e.g. webm/mp4)
 - Optionally trim output file with flexible time input
-
-## Requirements
-
-- Node.js 26+ (or 22.22.2+ / 24.15.0+)
-- ffmpeg (must be installed and available in PATH)
 
 ## Usage
 
