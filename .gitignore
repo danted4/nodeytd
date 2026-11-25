@@ -1,4 +1,4 @@
-node_modules
+/target
 downloads
 ytd.bat
 YTD.lnk
