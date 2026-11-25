@@ -20,6 +20,7 @@ Always pass `--all-features` to clippy and tests so the GUI module compiles, the
 |---|---|
 | `src/tools.rs` | finds, installs and updates yt-dlp, ffmpeg and deno (pinned GitHub hosts, SHA-256 checks, size caps) |
 | `src/ytdlp.rs` | `fetch_info` (`yt-dlp -J`) and `download` (progress parsing, pause and stop by killing the whole process tree) |
+| `src/cookies.rs` | YouTube sign-in: `CookieSource` (a browser or a cookies.txt file), installed-browser detection per OS, and plain-words explanations of yt-dlp's cookie errors |
 | `src/request.rs` | `DownloadRequest` and the yt-dlp arguments it maps to |
 | `src/session.rs` | the GUI queue: synchronous API, an engine thread with its own Tokio runtime, and `Slots` for the parallel limit |
 | `src/progress.rs` | `JobSnapshot`, `ProgressHandle`, the pause and stop errors, and formatters |

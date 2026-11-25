@@ -8,6 +8,7 @@ A full rewrite in Rust that replaces the Node CLI.
 - **Download queue:** parallel downloads with a limit in settings (default 2). Pause keeps the partial file and resume continues from it. Stop cancels and removes partial files. The list is saved between runs.
 - **CLI:** keeps the Node CLI's interactive prompts, and adds `ytd get`, `ytd formats` and `ytd tools`.
 - **No manual setup:** yt-dlp, ffmpeg (Windows and Linux) and deno are installed on first run from their GitHub releases and checked against the published SHA-256 sums. On macOS, install ffmpeg with `brew install ffmpeg`.
+- **YouTube sign-in:** when YouTube asks to "confirm you're not a bot", ytd offers the browsers installed on the computer and uses that browser's YouTube cookies. Each choice is tested before it is saved, with plain-words reasons when one fails. A cookies.txt import works with any browser. CLI: `ytd cookies …`, `--cookies-from`, `--cookies`.
 - **Auto-update toggle (off by default):** updates ytd itself and the tools it manages.
 - **Settings:** download folder (default `Downloads/rustYTD`), downloads at once, five colour themes, tool versions and "update tools".
 - **Trimming:** only the chosen section is downloaded (`--download-sections`), instead of downloading the whole video and trimming it afterwards.

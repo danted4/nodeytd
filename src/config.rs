@@ -69,6 +69,9 @@ pub struct AppConfig {
     /// Off by default: when on, the GUI updates itself and its tools.
     #[serde(default)]
     pub auto_update: bool,
+    /// Where yt-dlp gets YouTube sign-in cookies from. Unset: none are sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookies: Option<crate::cookies::CookieSource>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, ToolRecord>,
     /// Keys a newer version wrote: kept on rewrite.

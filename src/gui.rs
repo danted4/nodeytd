@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, FontFamily, RichText, Sense, Stroke, Vec2};
 
 use crate::config;
+use crate::cookies::{self, Browser, CookieSource};
 use crate::progress::{self, format_eta, format_size, format_speed, JobSnapshot, ProgressHandle};
 use crate::request::{clean_name, default_name, DownloadKind, DownloadRequest};
 use crate::session::{Hydrate, Job, Session, SessionEvent};
@@ -405,6 +406,12 @@ enum WorkerCmd {
         update: AvailableUpdate,
         snapshot: Arc<JobSnapshot>,
     },
+    /// Try a YouTube sign-in source on `url` before saving it.
+    TestCookies {
+        source: CookieSource,
+        url: String,
+        tools: ToolPaths,
+    },
 }
 
 enum WorkerEvent {
@@ -414,6 +421,10 @@ enum WorkerEvent {
         tools: Vec<Tool>,
     },
     AppInstalled(Result<String, String>),
+    CookiesTested {
+        source: CookieSource,
+        result: Result<(), String>,
+    },
     Info {
         seq: u64,
         /// The URL this info is for: the text box may have changed since.
@@ -472,6 +483,10 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                     // A failed tool check is not worth a toast: retried next launch.
                     tools: tools::outdated().await.unwrap_or_default(),
                 },
+                WorkerCmd::TestCookies { source, url, tools } => {
+                    let result = ytdlp::test_cookies(&tools, &source, &url).await;
+                    WorkerEvent::CookiesTested { source, result }
+                }
                 WorkerCmd::InstallApp {
                     update: available,
                     snapshot,
@@ -631,6 +646,10 @@ enum Fetch {
     Idle,
     Loading,
     Failed(String),
+    /// YouTube answered "confirm you're not a bot" for `url`.
+    SignIn {
+        url: String,
+    },
     Ready(Box<Draft>),
 }
 
@@ -674,6 +693,13 @@ pub struct GuiApp {
     checked_updates: bool,
     /// Outdated tools wait here until no download is running.
     tool_update_pending: Vec<Tool>,
+    /// Browsers installed here (for the sign-in choices).
+    browsers: Vec<Browser>,
+    /// A sign-in source being tested: what to say while it runs.
+    cookie_test: Option<String>,
+    cookie_error: Option<String>,
+    /// URL to fetch again once a sign-in source works.
+    cookie_retry: Option<String>,
 }
 
 impl GuiApp {
@@ -707,6 +733,10 @@ impl GuiApp {
             auto_update: cfg.auto_update,
             checked_updates: false,
             tool_update_pending: Vec::new(),
+            browsers: cookies::detect(),
+            cookie_test: None,
+            cookie_error: None,
+            cookie_retry: None,
         };
         if let Hydrate::Corrupt(error) = app.session.hydrate() {
             app.toast_fail(format!("saved list was unreadable and was reset: {error}"));
@@ -864,6 +894,87 @@ impl GuiApp {
         }
     }
 
+    // ------------------------------------------------------- sign-in
+
+    /// Test `source` on `url` (the video that was refused, or a short
+    /// public one); it is saved only if YouTube accepts it.
+    fn start_cookie_test(&mut self, source: CookieSource, url: String, retry: bool) {
+        let Some(tools) = self.session.tools() else {
+            self.toast_fail("tools are not ready yet");
+            return;
+        };
+        self.cookie_error = None;
+        self.cookie_test = Some(format!("checking {}…", source.usage()));
+        self.cookie_retry = retry.then(|| url.clone());
+        let _ = self.tx.send(WorkerCmd::TestCookies { source, url, tools });
+    }
+
+    fn apply_cookies(&mut self, source: Option<CookieSource>) {
+        let saved = source.clone();
+        let _ = config::edit_config(move |cfg| cfg.cookies = saved);
+        if let Some(mut tools) = self.session.tools() {
+            tools.cookies = source;
+            self.session.set_tools(tools);
+        }
+    }
+
+    /// Browser buttons, "import cookies.txt…" and (in settings) "stop using".
+    /// Returns the chosen source, or `Some(None)` for "stop using".
+    fn sign_in_choices(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: bool,
+    ) -> Option<Option<CookieSource>> {
+        let palette = self.palette();
+        let current = self.session.tools().and_then(|t| t.cookies);
+        let mut chosen = None;
+        if let Some(testing) = &self.cookie_test {
+            ui.label(RichText::new(testing).color(palette.dim));
+            paint_progress(ui, palette.fg, palette.row_alt, None, None);
+            return None;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if self.browsers.is_empty() {
+                ui.label(RichText::new("no supported browser found").color(palette.dim));
+            }
+            for browser in &self.browsers {
+                let selected = matches!(&current, Some(CookieSource::Browser { browser: b }) if b == browser.key);
+                if ui
+                    .selectable_label(selected, browser.label)
+                    .on_hover_text(format!("use {}'s YouTube sign-in", browser.label))
+                    .clicked()
+                {
+                    chosen = Some(Some(CookieSource::Browser {
+                        browser: browser.key.to_string(),
+                    }));
+                }
+            }
+            let file_selected = matches!(current, Some(CookieSource::File { .. }));
+            if ui
+                .selectable_label(file_selected, "import cookies.txt…")
+                .on_hover_text(
+                    "For any browser: export youtube.com cookies in Netscape (cookies.txt) format with a cookies.txt browser extension, then pick the file.",
+                )
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("choose a cookies.txt export")
+                    .add_filter("cookies.txt", &["txt"])
+                    .pick_file()
+                {
+                    chosen = Some(Some(CookieSource::File { path }));
+                }
+            }
+            if settings && current.is_some() && ui.button("stop using").clicked() {
+                chosen = Some(None);
+            }
+        });
+        if let Some(error) = &self.cookie_error {
+            ui.add(egui::Label::new(RichText::new(error).color(palette.fail)).wrap());
+        }
+        chosen
+    }
+
     // ------------------------------------------------------------- fetch
 
     fn start_fetch(&mut self) {
@@ -913,6 +1024,10 @@ impl GuiApp {
                             let _ = self.tx.send(WorkerCmd::Thumb { seq, url: thumb });
                         }
                     }
+                    Err(error) if cookies::is_sign_in_error(&error) => {
+                        self.cookie_error = None;
+                        self.fetch = Fetch::SignIn { url };
+                    }
                     Err(error) => self.fetch = Fetch::Failed(error),
                 },
                 WorkerEvent::Thumb { seq, result } if seq == self.fetch_seq => {
@@ -948,6 +1063,21 @@ impl GuiApp {
                     Some(Duration::from_secs(30)),
                     None,
                 ),
+                WorkerEvent::CookiesTested { source, result } => {
+                    self.cookie_test = None;
+                    match result {
+                        Ok(()) => {
+                            self.cookie_error = None;
+                            self.toast(format!("using {}", source.usage()));
+                            self.apply_cookies(Some(source));
+                            if let Some(url) = self.cookie_retry.take() {
+                                self.url = url;
+                                self.start_fetch();
+                            }
+                        }
+                        Err(reason) => self.cookie_error = Some(reason),
+                    }
+                }
                 WorkerEvent::AppInstalled(Err(error)) => {
                     self.toast_fail(format!("update failed: {error}"))
                 }
@@ -958,6 +1088,11 @@ impl GuiApp {
         for event in self.session.drain_events() {
             match event {
                 SessionEvent::Finished { title, .. } => self.toast(format!("saved {title}")),
+                SessionEvent::Failed { title, error, .. } if cookies::is_sign_in_error(&error) => {
+                    self.toast_fail(format!(
+                        "{title}: YouTube wants a signed-in browser. Choose one in settings → YouTube sign-in, then restart the download."
+                    ))
+                }
                 SessionEvent::Failed { title, error, .. } => {
                     self.toast_fail(format!("{title}: {error}"))
                 }
@@ -1081,6 +1216,32 @@ impl GuiApp {
     fn fetch_area(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette();
         let mut action = None;
+        // The sign-in card needs `&mut self`: render it from a snapshot.
+        if let Fetch::SignIn { url } = &self.fetch {
+            let url = url.clone();
+            let chosen = card(ui, palette, |ui| {
+                ui.label(
+                    RichText::new("YouTube wants a signed-in browser")
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "YouTube is asking this computer to confirm it is not a bot. ytd can use the YouTube sign-in from one of your browsers: it reads that browser's YouTube cookies from disk and sends them only to YouTube.",
+                        )
+                        .color(palette.dim),
+                    )
+                    .wrap(),
+                );
+                ui.label(RichText::new("use the sign-in from:").color(palette.dim));
+                self.sign_in_choices(ui, false)
+            });
+            if let Some(Some(source)) = chosen {
+                self.start_cookie_test(source, url, true);
+            }
+            return;
+        }
         match &mut self.fetch {
             Fetch::Idle => {}
             Fetch::Loading => {
@@ -1095,19 +1256,27 @@ impl GuiApp {
                     ui.label(RichText::new(error).color(palette.fail));
                 });
             }
+            // Drawn above, before this match borrows `self.fetch`.
+            Fetch::SignIn { .. } => {}
             Fetch::Ready(draft) => {
                 action = draft_ui(ui, draft, palette, &self.download_dir);
             }
         }
         match action {
-            Some(DraftAction::Queue(request)) => match self.session.queue(request) {
-                Ok(_) => {
-                    self.fetch = Fetch::Idle;
-                    self.url.clear();
-                    self.session.persist(true);
+            Some(DraftAction::Queue(request)) => {
+                let queued_url = request.url.clone();
+                match self.session.queue(request) {
+                    Ok(_) => {
+                        self.fetch = Fetch::Idle;
+                        // Keep a link typed while this one was loading.
+                        if self.url.trim() == queued_url {
+                            self.url.clear();
+                        }
+                        self.session.persist(true);
+                    }
+                    Err(error) => self.toast_fail(error),
                 }
-                Err(error) => self.toast_fail(error),
-            },
+            }
             Some(DraftAction::Dismiss) => self.fetch = Fetch::Idle,
             None => {}
         }
@@ -1171,6 +1340,7 @@ impl GuiApp {
         let mut open = true;
         let mut changed = false;
         let mut update_tools = false;
+        let mut cookie_choice: Option<Option<CookieSource>> = None;
         egui::Window::new("settings")
             .open(&mut open)
             .collapsible(false)
@@ -1223,6 +1393,20 @@ impl GuiApp {
                     }
                 });
                 ui.separator();
+                ui.label(RichText::new("YouTube sign-in").color(palette.dim));
+                let current = self
+                    .session
+                    .tools()
+                    .and_then(|t| t.cookies)
+                    .map(|c| c.label())
+                    .unwrap_or_else(|| "not used".into());
+                ui.label(current).on_hover_text(
+                    "Only needed when YouTube asks to confirm you're not a bot. ytd reads the browser's YouTube cookies from disk and sends them only to YouTube.",
+                );
+                if let Some(choice) = self.sign_in_choices(ui, true) {
+                    cookie_choice = Some(choice);
+                }
+                ui.separator();
                 ui.label(RichText::new("tools").color(palette.dim));
                 let cfg = config::load_config();
                 for tool in Tool::ALL {
@@ -1259,6 +1443,16 @@ impl GuiApp {
         }
         if changed {
             self.save_settings();
+        }
+        match cookie_choice {
+            Some(Some(source)) => {
+                self.start_cookie_test(source, ytdlp::COOKIE_TEST_URL.to_string(), false)
+            }
+            Some(None) => {
+                self.apply_cookies(None);
+                self.toast("YouTube sign-in no longer used");
+            }
+            None => {}
         }
         if update_tools {
             self.setup_tools(Some(tools::managed()));

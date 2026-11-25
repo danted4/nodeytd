@@ -197,6 +197,9 @@ pub fn common_args(tools: &ToolPaths) -> Vec<OsString> {
         args.push("--js-runtimes".into());
         args.push(runtime);
     }
+    if let Some(cookies) = &tools.cookies {
+        args.extend(cookies.args());
+    }
     args
 }
 
@@ -209,6 +212,7 @@ mod tests {
             ytdlp: PathBuf::from("/t/yt-dlp"),
             ffmpeg: PathBuf::from("/t/bin/ffmpeg"),
             deno: Some(PathBuf::from("/t/deno")),
+            cookies: None,
         }
     }
 
@@ -264,6 +268,19 @@ mod tests {
             "a URL can never be read as an option"
         );
         assert!(!joined.contains("--download-sections"));
+    }
+
+    #[test]
+    fn sign_in_is_passed_to_every_call() {
+        let mut with_cookies = tools();
+        assert!(!strings(&common_args(&with_cookies))
+            .join(" ")
+            .contains("--cookies"));
+        with_cookies.cookies = Some(crate::cookies::CookieSource::Browser {
+            browser: "firefox".into(),
+        });
+        let joined = strings(&request(DownloadKind::Merged).ytdlp_args(&with_cookies)).join(" ");
+        assert!(joined.contains("--cookies-from-browser firefox"));
     }
 
     #[test]

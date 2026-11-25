@@ -300,6 +300,24 @@ pub async fn fetch_info(tools: &ToolPaths, url: &str) -> Result<VideoInfo> {
     Ok(info)
 }
 
+/// A short public video used to check a sign-in when no URL is at hand.
+pub const COOKIE_TEST_URL: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+
+/// Try `source` on `url` before saving it. The error is a plain-words reason
+/// (locked, encrypted, not signed in…) ready to show the user.
+pub async fn test_cookies(
+    tools: &ToolPaths,
+    source: &crate::cookies::CookieSource,
+    url: &str,
+) -> std::result::Result<(), String> {
+    let mut with_cookies = tools.clone();
+    with_cookies.cookies = Some(source.clone());
+    fetch_info(&with_cookies, url)
+        .await
+        .map(|_| ())
+        .map_err(|error| crate::cookies::explain(source, &format!("{error:#}")))
+}
+
 /// `yt-dlp --version`.
 pub async fn version(tools: &ToolPaths) -> Result<String> {
     let output = command(tools, vec!["--version".into()]).output().await?;

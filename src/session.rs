@@ -517,6 +517,7 @@ mod tests {
             ytdlp: dir.join("no-such-yt-dlp"),
             ffmpeg: dir.join("ffmpeg"),
             deno: None,
+            cookies: None,
         }
     }
 

@@ -47,6 +47,17 @@ Top bar:
 - **auto-update** (off by default) keeps ytd and its tools current from GitHub Releases. App updates take effect the next time you start ytd. On macOS a new version is announced instead of installed.
 - The cog opens settings: download folder, downloads at once, colour theme, tool versions and **update tools**.
 
+### "Sign in to confirm you're not a bot"
+
+YouTube sometimes asks a computer to prove it is not a bot, especially after a lot of downloading. ytd then shows **YouTube wants a signed-in browser**, listing the browsers installed on your computer:
+
+- Pick the browser you use YouTube in. ytd reads that browser's YouTube cookies from its profile on disk (no browser window opens) and sends them only to YouTube.
+- Each choice is tested before it is saved. If it fails, ytd says why and what to do next (for example: close the browser, or that the browser encrypts its cookies).
+- **import cookies.txt…** works with any browser: export youtube.com cookies in Netscape (cookies.txt) format with a cookies.txt browser extension and pick the file.
+- Change it, or stop using it, in settings → **YouTube sign-in**.
+
+Supported browsers: Firefox, Chrome, Edge, Brave, Opera, Vivaldi, Chromium, Safari and Whale. On Windows, Chromium-based browsers (Chrome, Edge…) may encrypt their cookies so that other apps cannot read them. Firefox or a cookies.txt file always work.
+
 ## CLI
 
 ```text
@@ -54,7 +65,10 @@ ytd                      interactive prompts (URL, type, quality, name, trim)
 ytd get <url> [options]  download without prompts
 ytd formats <url>        list the formats a video offers
 ytd tools [status|install|update]
+ytd cookies [status|browser <name>|file <path>|off]
 ```
+
+`ytd cookies browser firefox` (or `file cookies.txt`) tests the browser's YouTube sign-in and, if it works, uses it from then on. For a single run, add `--cookies-from <browser>` or `--cookies <file>` to any command.
 
 `ytd get` options:
 

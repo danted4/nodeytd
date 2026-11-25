@@ -5,6 +5,7 @@
 //! [`progress::JobSnapshot`]s; they never touch a running download directly.
 
 pub mod config;
+pub mod cookies;
 pub mod fsutil;
 pub mod icon_raster;
 pub mod jobs;

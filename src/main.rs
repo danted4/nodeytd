@@ -8,6 +8,7 @@ use dialoguer::{Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use ytd::config;
+use ytd::cookies::{self, CookieSource};
 use ytd::progress::ProgressHandle;
 use ytd::request::{clean_name, default_name, DownloadKind, DownloadRequest};
 use ytd::tools::{self, Tool, ToolPaths};
@@ -21,6 +22,18 @@ use ytd::ytdlp::{self, Format, VideoInfo};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Use this browser's YouTube sign-in for this run (firefox, chrome,
+    /// edge, brave, opera, vivaldi, chromium, safari, whale).
+    #[arg(
+        long,
+        global = true,
+        value_name = "BROWSER",
+        conflicts_with = "cookies"
+    )]
+    cookies_from: Option<String>,
+    /// Use a cookies.txt export for this run.
+    #[arg(long, global = true, value_name = "FILE")]
+    cookies: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -57,6 +70,24 @@ enum Command {
         #[command(subcommand)]
         action: Option<ToolsAction>,
     },
+    /// Use a browser's YouTube sign-in when YouTube asks to confirm you are
+    /// not a bot. Each choice is tested before it is saved.
+    Cookies {
+        #[command(subcommand)]
+        action: Option<CookiesAction>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum CookiesAction {
+    /// What is in use, and which browsers are installed.
+    Status,
+    /// Use a browser's sign-in (firefox, chrome, edge, brave, …).
+    Browser { name: String },
+    /// Use a cookies.txt export (Netscape format).
+    File { path: PathBuf },
+    /// Stop sending cookies.
+    Off,
 }
 
 #[derive(Subcommand, Clone, Copy)]
@@ -74,17 +105,111 @@ async fn main() -> ExitCode {
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {error:#}");
+            let message = format!("{error:#}");
+            eprintln!("Error: {message}");
+            if cookies::is_sign_in_error(&message) {
+                eprintln!("{}", sign_in_hint());
+            }
             ExitCode::FAILURE
         }
     }
 }
 
+/// What to do when YouTube asks to sign in, naming the browsers found here.
+fn sign_in_hint() -> String {
+    let found: Vec<&str> = cookies::detect().iter().map(|b| b.key).collect();
+    let browsers = if found.is_empty() {
+        "firefox".to_string()
+    } else {
+        found.join(" | ")
+    };
+    format!(
+        "YouTube wants a signed-in browser. Use your browser's YouTube sign-in:\n  \
+         ytd cookies browser <{browsers}>\n\
+         or a cookies.txt export:\n  ytd cookies file <path>"
+    )
+}
+
+fn browser_source(name: &str) -> Result<CookieSource> {
+    let name = name.trim().to_ascii_lowercase();
+    if !cookies::is_browser(&name) {
+        let all: Vec<&str> = cookies::BROWSERS.iter().map(|b| b.key).collect();
+        bail!("unknown browser '{name}' (one of: {})", all.join(", "));
+    }
+    Ok(CookieSource::Browser { browser: name })
+}
+
+async fn cookies_command(action: CookiesAction) -> Result<()> {
+    let source = match action {
+        CookiesAction::Status => {
+            let current = config::load_config()
+                .cookies
+                .map(|c| c.label())
+                .unwrap_or_else(|| "not used".into());
+            println!("YouTube sign-in: {current}");
+            let found: Vec<&str> = cookies::detect().iter().map(|b| b.label).collect();
+            println!(
+                "browsers found: {}",
+                if found.is_empty() {
+                    "none".to_string()
+                } else {
+                    found.join(", ")
+                }
+            );
+            return Ok(());
+        }
+        CookiesAction::Off => {
+            config::edit_config(|cfg| cfg.cookies = None)?;
+            println!("No cookies will be sent.");
+            return Ok(());
+        }
+        CookiesAction::Browser { name } => browser_source(&name)?,
+        CookiesAction::File { path } => {
+            let path = std::fs::canonicalize(&path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            CookieSource::File { path }
+        }
+    };
+    let tools = ensure_tools(None).await?;
+    let spinner = spinner(&format!("Checking {}…", source.usage()));
+    let result = ytdlp::test_cookies(&tools, &source, ytdlp::COOKIE_TEST_URL).await;
+    spinner.finish_and_clear();
+    match result {
+        Ok(()) => {
+            let usage = source.usage();
+            config::edit_config(move |cfg| cfg.cookies = Some(source))?;
+            println!("Using {usage} from now on.");
+            Ok(())
+        }
+        Err(reason) => bail!("{reason}"),
+    }
+}
+
+fn spinner(message: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+    );
+    spinner.set_message(message.to_string());
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    spinner
+}
+
 async fn run(cli: Cli) -> Result<()> {
+    let cookie_override = match (cli.cookies_from, cli.cookies) {
+        (Some(browser), _) => Some(browser_source(&browser)?),
+        (None, Some(path)) => Some(CookieSource::File { path }),
+        (None, None) => None,
+    };
+    let ensure = || ensure_tools(cookie_override.clone());
     match cli.command {
-        None => interactive().await,
+        None => interactive(ensure().await?).await,
+        Some(Command::Cookies { action }) => {
+            cookies_command(action.unwrap_or(CookiesAction::Status)).await
+        }
         Some(Command::Formats { url }) => {
-            let tools = ensure_tools().await?;
+            let tools = ensure().await?;
             let info = fetch(&tools, &url).await?;
             print_formats(&info);
             Ok(())
@@ -102,7 +227,7 @@ async fn run(cli: Cli) -> Result<()> {
             end,
             dir,
         }) => {
-            let tools = ensure_tools().await?;
+            let tools = ensure().await?;
             let info = fetch(&tools, &url).await?;
             let trim =
                 TrimRange::parse(start.as_deref().unwrap_or(""), end.as_deref().unwrap_or(""))?;
@@ -206,13 +331,7 @@ fn output_ext(info: &VideoInfo, kind: DownloadKind, video: Option<&str>) -> Opti
 }
 
 async fn fetch(tools: &ToolPaths, url: &str) -> Result<VideoInfo> {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("{spinner} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    spinner.set_message("Fetching video info…");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = spinner("Fetching video info…");
     let result = ytdlp::fetch_info(tools, url).await;
     spinner.finish_and_clear();
     result
@@ -247,15 +366,19 @@ async fn download(tools: &ToolPaths, request: &DownloadRequest) -> Result<()> {
     }
 }
 
-/// Tools, installing what is missing on first use.
-async fn ensure_tools() -> Result<ToolPaths> {
-    let paths = match tools::resolve() {
+/// Tools, installing what is missing on first use. `cookies` overrides the
+/// saved sign-in for this run.
+async fn ensure_tools(cookies: Option<CookieSource>) -> Result<ToolPaths> {
+    let mut paths = match tools::resolve() {
         Ok(paths) if paths.deno.is_some() || !tools::can_install(Tool::Deno) => paths,
         _ => {
             println!("Setting up tools in {}", config::tools_dir().display());
             tools::install_missing(|tool| ProgressHandle::cli(tool.key())).await?
         }
     };
+    if cookies.is_some() {
+        paths.cookies = cookies;
+    }
     if paths.deno.is_none() {
         eprintln!("Warning: deno not found; some YouTube formats may be missing.");
     }
@@ -299,7 +422,7 @@ async fn tools_command(action: ToolsAction) -> Result<()> {
 }
 
 /// The Node CLI's flow: URL, type, quality, name, trim.
-async fn interactive() -> Result<()> {
+async fn interactive(tools: ToolPaths) -> Result<()> {
     let url: String = Input::new()
         .with_prompt("Enter the video URL")
         .validate_with(|value: &String| -> Result<(), &str> {
@@ -312,7 +435,6 @@ async fn interactive() -> Result<()> {
         })
         .interact_text()?;
     let url = url.trim().to_string();
-    let tools = ensure_tools().await?;
     let info = fetch(&tools, &url).await?;
     println!("{}  {}", info.title, info.duration_text());
 

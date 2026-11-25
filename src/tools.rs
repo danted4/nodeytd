@@ -58,6 +58,8 @@ pub struct ToolPaths {
     pub ytdlp: PathBuf,
     pub ffmpeg: PathBuf,
     pub deno: Option<PathBuf>,
+    /// YouTube sign-in for every yt-dlp call, when the user chose one.
+    pub cookies: Option<crate::cookies::CookieSource>,
 }
 
 impl ToolPaths {
@@ -115,6 +117,7 @@ pub fn resolve() -> Result<ToolPaths> {
             ytdlp,
             ffmpeg,
             deno: locate(Tool::Deno),
+            cookies: config::load_config().cookies,
         }),
         (ytdlp, ffmpeg) => {
             let mut names = Vec::new();
