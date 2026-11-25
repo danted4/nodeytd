@@ -69,6 +69,8 @@ ytd tools [status|install|update]
 
 Example: `ytd get https://www.youtube.com/watch?v=jNQXAC9IVRw --kind audio --start 3 --end 0:10`
 
+Ctrl-C cancels a download and removes its partial files.
+
 ## Where things go
 
 - **Downloads:** `Downloads/rustYTD` (change it in settings).

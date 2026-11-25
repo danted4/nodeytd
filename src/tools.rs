@@ -78,12 +78,24 @@ pub fn which(exe_name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Homebrew's bin folders. An app opened from Finder, the Dock or Spotlight
+/// gets launchd's minimal PATH, which has neither.
+const MACOS_EXTRA_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
 pub fn locate(tool: Tool) -> Option<PathBuf> {
     let local = config::tools_dir().join(tool.exe_name());
     if local.is_file() {
         return Some(local);
     }
-    which(&tool.exe_name())
+    which(&tool.exe_name()).or_else(|| {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        MACOS_EXTRA_DIRS
+            .iter()
+            .map(|dir| Path::new(dir).join(tool.exe_name()))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 /// Tools that are not installed anywhere we look.
@@ -291,11 +303,30 @@ pub async fn outdated() -> Result<Vec<Tool>> {
             continue;
         };
         let release = latest_release(&client, &github, plan.repo).await?;
-        if release.version() != record.version {
+        if is_stale(tool, &record.version, &release.version()) {
             stale.push(tool);
         }
     }
     Ok(stale)
+}
+
+/// ffmpeg's builds are republished every day under a rolling tag (its
+/// "version" is the publish date): only a build a month newer is worth the
+/// ~200 MB download. Other tools: any newer release.
+const FFMPEG_REFRESH_DAYS: i64 = 30;
+
+fn is_stale(tool: Tool, installed: &str, latest: &str) -> bool {
+    if installed == latest {
+        return false;
+    }
+    if tool != Tool::Ffmpeg {
+        return true;
+    }
+    let date = |raw: &str| chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
+    match (date(installed), date(latest)) {
+        (Some(installed), Some(latest)) => (latest - installed).num_days() >= FFMPEG_REFRESH_DAYS,
+        _ => true,
+    }
 }
 
 impl Release {
@@ -411,8 +442,16 @@ pub fn managed() -> Vec<Tool> {
 /// Re-install every tool ytd manages (those in our `tools/` folder, plus any
 /// that are missing). Tools found on PATH are the user's to update.
 pub async fn update_all(progress_for: impl Fn(Tool) -> ProgressHandle) -> Result<ToolPaths> {
+    update_tools(&managed(), progress_for).await
+}
+
+/// Re-install exactly these tools (auto-update passes only the stale ones).
+pub async fn update_tools(
+    wanted: &[Tool],
+    progress_for: impl Fn(Tool) -> ProgressHandle,
+) -> Result<ToolPaths> {
     let mut errors = Vec::new();
-    for tool in managed() {
+    for &tool in wanted {
         let progress = progress_for(tool);
         match install(tool, &progress).await {
             Ok(_) => progress.finish(),
@@ -768,6 +807,19 @@ mod tests {
         let deno = plan_for(Tool::Deno, "windows", "x86_64").unwrap();
         assert_eq!(deno.asset, "deno-x86_64-pc-windows-msvc.zip");
         assert_eq!(deno.members, vec!["deno.exe".to_string()]);
+    }
+
+    #[test]
+    fn ffmpeg_is_stale_only_after_a_month() {
+        assert!(
+            !is_stale(Tool::Ffmpeg, "2026-11-24", "2026-11-25"),
+            "daily rebuild"
+        );
+        assert!(!is_stale(Tool::Ffmpeg, "2026-11-01", "2026-11-30"));
+        assert!(is_stale(Tool::Ffmpeg, "2026-10-01", "2026-11-25"));
+        assert!(is_stale(Tool::Ffmpeg, "junk", "2026-11-25"));
+        assert!(is_stale(Tool::YtDlp, "2026.11.23", "2026.11.25"));
+        assert!(!is_stale(Tool::YtDlp, "2026.11.23", "2026.11.23"));
     }
 
     #[test]

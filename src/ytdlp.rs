@@ -456,8 +456,16 @@ pub async fn download(
                 if let Err(error) = progress.check_control() {
                     kill_tree(&mut child).await;
                     drop(lines);
-                    if crate::progress::is_stopped(&error) {
-                        remove_partials(request).await;
+                    // A stop can land while a pause is still killing yt-dlp:
+                    // look at the flags again, stop wins.
+                    let stopped = crate::progress::is_stopped(&error)
+                        || progress
+                            .check_control()
+                            .err()
+                            .is_some_and(|e| crate::progress::is_stopped(&e));
+                    if stopped {
+                        let request = request.clone();
+                        let _ = tokio::task::spawn_blocking(move || remove_partials(&request)).await;
                         bail!(DownloadStopped);
                     }
                     bail!(DownloadPaused);
@@ -473,26 +481,44 @@ pub async fn download(
     file.context("yt-dlp finished without reporting the output file")
 }
 
-/// yt-dlp's leftovers for this request (`<name>.f137.mp4.part`,
-/// `.part-Frag3.part`, `.ytdl`, `.temp.mp4`). Only files that start with the
-/// request's own `<name>.` are touched, and only partial-download kinds.
-fn is_partial_of(file_name: &str, name: &str) -> bool {
+/// yt-dlp's leftovers for an unfinished request. Only files named
+/// `<name>.<something>` are ever considered, and the final file is never
+/// matched (its extension is fixed by the kind, or it is not yet there):
+/// - partial downloads: `.part`, `.part-Frag3.part`, `.ytdl`, `.temp.mp4`
+/// - a finished stream of a merge: `<name>.f137.mp4`
+/// - an mp3 job's source audio before conversion: `<name>.webm`
+fn is_partial_of(file_name: &str, name: &str, kind: DownloadKind) -> bool {
     let Some(rest) = file_name
         .strip_prefix(name)
         .and_then(|r| r.strip_prefix('.'))
     else {
         return false;
     };
-    rest.ends_with(".part")
+    if rest.ends_with(".part")
         || rest.ends_with(".ytdl")
         || rest.contains(".part-Frag")
         || rest.starts_with("temp.")
+    {
+        return true;
+    }
+    // `f<format id>.<ext>`: one stream of a merge, kept until the merger runs.
+    let stream = rest.strip_prefix('f').and_then(|r| r.split_once('.'));
+    if let Some((id, ext)) = stream {
+        let id_ok = !id.is_empty() && id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+        if id_ok && !ext.is_empty() && !ext.contains('.') {
+            return true;
+        }
+    }
+    // An mp3 job downloads `<name>.<audio ext>` and converts it to `<name>.mp3`.
+    const SOURCE_AUDIO: [&str; 8] = ["m4a", "webm", "opus", "ogg", "mp4", "aac", "mka", "flac"];
+    kind == DownloadKind::Audio && SOURCE_AUDIO.contains(&rest)
 }
 
 /// A stopped download is abandoned: drop its partial files (a paused one
 /// keeps them so it can resume). Windows can release file handles a moment
-/// after the process tree is gone, so retry briefly.
-async fn remove_partials(request: &DownloadRequest) {
+/// after the process tree is gone, so retry briefly. Blocking: call it from
+/// a blocking task or thread.
+pub fn remove_partials(request: &DownloadRequest) {
     for _ in 0..10 {
         let Ok(entries) = std::fs::read_dir(&request.dir) else {
             return;
@@ -500,7 +526,7 @@ async fn remove_partials(request: &DownloadRequest) {
         let mut left = false;
         for entry in entries.flatten() {
             let file_name = entry.file_name();
-            if is_partial_of(&file_name.to_string_lossy(), &request.name)
+            if is_partial_of(&file_name.to_string_lossy(), &request.name, request.kind)
                 && std::fs::remove_file(entry.path()).is_err()
             {
                 left = true;
@@ -509,7 +535,7 @@ async fn remove_partials(request: &DownloadRequest) {
         if !left {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::thread::sleep(Duration::from_millis(300));
     }
 }
 
@@ -520,21 +546,70 @@ mod tests {
     #[test]
     fn partials_match_only_this_request() {
         let name = "Clip-2026-11-25-23-46-05";
-        assert!(is_partial_of(&format!("{name}.f628.mp4.part"), name));
-        assert!(is_partial_of(
-            &format!("{name}.f628.mp4.part-Frag33.part"),
-            name
-        ));
-        assert!(is_partial_of(&format!("{name}.f628.mp4.ytdl"), name));
+        let merged = DownloadKind::Merged;
+        let partial = |file: String| is_partial_of(&file, name, merged);
+        assert!(partial(format!("{name}.f628.mp4.part")));
+        assert!(partial(format!("{name}.f628.mp4.part-Frag33.part")));
+        assert!(partial(format!("{name}.f628.mp4.ytdl")));
+        assert!(partial(format!("{name}.temp.mp4")));
         assert!(
-            !is_partial_of(&format!("{name}.mp4"), name),
-            "finished file stays"
+            partial(format!("{name}.f137.mp4")),
+            "finished video stream of a merge"
         );
+        assert!(partial(format!("{name}.f251-drc.webm")));
+        assert!(!partial(format!("{name}.mp4")), "final file stays");
         assert!(
-            !is_partial_of(&format!("{name}-2.f1.mp4.part"), name),
-            "other job"
+            !partial(format!("{name}.webm")),
+            "final file of a video job stays"
         );
-        assert!(!is_partial_of("other.f1.mp4.part", name));
+        assert!(!partial(format!("{name}-2.f1.mp4.part")), "other job");
+        assert!(!is_partial_of("other.f1.mp4.part", name, merged));
+    }
+
+    #[test]
+    fn mp3_source_audio_is_a_partial_but_the_mp3_is_not() {
+        let name = "Song";
+        assert!(is_partial_of("Song.webm", name, DownloadKind::Audio));
+        assert!(is_partial_of("Song.m4a", name, DownloadKind::Audio));
+        assert!(!is_partial_of("Song.mp3", name, DownloadKind::Audio));
+        assert!(
+            !is_partial_of("Song.txt", name, DownloadKind::Audio),
+            "unrelated file"
+        );
+        assert!(!is_partial_of("Song.webm", name, DownloadKind::Single));
+    }
+
+    #[test]
+    fn remove_partials_keeps_finished_and_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in [
+            "Clip.f137.mp4",
+            "Clip.f140.m4a.part",
+            "Clip.f140.m4a.ytdl",
+            "Clip.mp4",
+            "Other.f137.mp4",
+        ] {
+            std::fs::write(dir.path().join(file), b"x").unwrap();
+        }
+        let request = DownloadRequest {
+            url: "u".into(),
+            title: "t".into(),
+            kind: DownloadKind::Merged,
+            video_format: Some("137".into()),
+            audio_format: Some("140".into()),
+            name: "Clip".into(),
+            dir: dir.path().to_path_buf(),
+            trim_start: None,
+            trim_end: None,
+            expected_size: 0,
+        };
+        remove_partials(&request);
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["Clip.mp4", "Other.f137.mp4"]);
     }
 
     #[test]

@@ -281,10 +281,11 @@ fn cli_style() -> ProgressStyle {
         )
 }
 
-/// One handle that drives a CLI bar, a GUI snapshot, or nothing.
+/// One handle that drives a CLI bar, a GUI snapshot, or nothing. The CLI
+/// variant carries a control snapshot too, so Ctrl-C can stop a download.
 #[derive(Clone, Debug)]
 pub enum ProgressHandle {
-    Cli(ProgressBar),
+    Cli(ProgressBar, std::sync::Arc<JobSnapshot>),
     Gui(std::sync::Arc<JobSnapshot>),
     Hidden,
 }
@@ -294,7 +295,7 @@ impl ProgressHandle {
         let bar = ProgressBar::new(1);
         bar.set_style(cli_style());
         bar.set_message(label.to_string());
-        Self::Cli(bar)
+        Self::Cli(bar, std::sync::Arc::default())
     }
 
     pub fn gui(snapshot: std::sync::Arc<JobSnapshot>) -> Self {
@@ -308,9 +309,18 @@ impl ProgressHandle {
         }
     }
 
+    /// The flags a front sets to pause or stop this job.
+    pub fn control(&self) -> Option<std::sync::Arc<JobSnapshot>> {
+        match self {
+            Self::Cli(_, control) => Some(std::sync::Arc::clone(control)),
+            Self::Gui(snapshot) => Some(std::sync::Arc::clone(snapshot)),
+            Self::Hidden => None,
+        }
+    }
+
     pub fn set_length(&self, total: u64) {
         match self {
-            Self::Cli(bar) => bar.set_length(total.max(1)),
+            Self::Cli(bar, _) => bar.set_length(total.max(1)),
             Self::Gui(snapshot) => snapshot.total.store(total, Ordering::Relaxed),
             Self::Hidden => {}
         }
@@ -318,7 +328,7 @@ impl ProgressHandle {
 
     pub fn set_position(&self, downloaded: u64) {
         match self {
-            Self::Cli(bar) => bar.set_position(downloaded),
+            Self::Cli(bar, _) => bar.set_position(downloaded),
             Self::Gui(snapshot) => snapshot.downloaded.store(downloaded, Ordering::Relaxed),
             Self::Hidden => {}
         }
@@ -343,7 +353,7 @@ impl ProgressHandle {
 
     pub fn set_status(&self, status: &str) {
         match self {
-            Self::Cli(bar) => bar.set_message(status.to_string()),
+            Self::Cli(bar, _) => bar.set_message(status.to_string()),
             Self::Gui(snapshot) => snapshot.set_status(status),
             Self::Hidden => {}
         }
@@ -351,23 +361,23 @@ impl ProgressHandle {
 
     pub fn finish(&self) {
         match self {
-            Self::Cli(bar) => bar.finish(),
+            Self::Cli(bar, _) => bar.finish(),
             Self::Gui(snapshot) => snapshot.mark_finished(),
             Self::Hidden => {}
         }
     }
 
     pub fn abandon(&self) {
-        if let Self::Cli(bar) = self {
+        if let Self::Cli(bar, _) = self {
             bar.abandon();
         }
     }
 
-    /// Stop or pause requested on the GUI snapshot (the CLI never asks).
+    /// Stop or pause requested (GUI buttons, CLI Ctrl-C).
     pub fn check_control(&self) -> anyhow::Result<()> {
         match self {
-            Self::Gui(snapshot) => snapshot.check_control(),
-            _ => Ok(()),
+            Self::Gui(snapshot) | Self::Cli(_, snapshot) => snapshot.check_control(),
+            Self::Hidden => Ok(()),
         }
     }
 }

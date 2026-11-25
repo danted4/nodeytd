@@ -35,18 +35,41 @@ pub struct PersistedJob {
 struct JobFile {
     #[serde(default)]
     jobs: Vec<serde_json::Value>,
+    /// Top-level keys a newer version wrote.
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// What was in `jobs.json`. Records this version cannot read (a newer kind,
+/// a hand edit) and unknown top-level keys are kept in `foreign` / `extra`
+/// and written back unchanged, so an older version never loses them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobList {
+    pub jobs: Vec<PersistedJob>,
+    pub foreign: Vec<serde_json::Value>,
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl JobList {
+    /// Highest id in use, readable records or not.
+    pub fn max_id(&self) -> u64 {
+        let known = self.jobs.iter().map(|job| job.id);
+        let foreign = self
+            .foreign
+            .iter()
+            .filter_map(|value| value.get("id").and_then(serde_json::Value::as_u64));
+        known.chain(foreign).max().unwrap_or(0)
+    }
 }
 
 #[derive(Debug)]
 pub enum LoadJobs {
     Empty,
-    Loaded(Vec<PersistedJob>),
+    Loaded(JobList),
     /// The file did not parse; it was moved to `jobs.json.corrupt`.
     Corrupt(String),
 }
 
-/// Records that do not parse (a newer kind, a hand edit) are skipped, not
-/// fatal: one bad entry never loses the rest of the list.
 pub fn load_jobs_from(path: &Path) -> LoadJobs {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -54,15 +77,20 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
     };
     match serde_json::from_str::<JobFile>(&text) {
         Ok(file) => {
-            let jobs: Vec<PersistedJob> = file
-                .jobs
-                .into_iter()
-                .filter_map(|value| serde_json::from_value(value).ok())
-                .collect();
-            if jobs.is_empty() {
+            let mut list = JobList {
+                extra: file.extra,
+                ..JobList::default()
+            };
+            for value in file.jobs {
+                match serde_json::from_value::<PersistedJob>(value.clone()) {
+                    Ok(job) => list.jobs.push(job),
+                    Err(_) => list.foreign.push(value),
+                }
+            }
+            if list == JobList::default() {
                 LoadJobs::Empty
             } else {
-                LoadJobs::Loaded(jobs)
+                LoadJobs::Loaded(list)
             }
         }
         Err(error) => {
@@ -72,8 +100,18 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
     }
 }
 
-pub fn save_jobs_to(path: &Path, jobs: &[PersistedJob]) -> Result<()> {
-    let file = serde_json::json!({ "jobs": jobs });
+pub fn save_jobs_to(path: &Path, list: &JobList) -> Result<()> {
+    let mut jobs: Vec<serde_json::Value> = list
+        .jobs
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<_, _>>()
+        .context("serialize jobs")?;
+    jobs.extend(list.foreign.iter().cloned());
+    let file = JobFile {
+        jobs,
+        extra: list.extra.clone(),
+    };
     let bytes = serde_json::to_vec_pretty(&file).context("serialize jobs")?;
     atomic_write(path, &bytes)
 }
@@ -109,25 +147,42 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_and_skip_bad_records() {
+    fn unknown_records_and_keys_survive_a_rewrite() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         assert!(matches!(load_jobs_from(&path), LoadJobs::Empty));
-        save_jobs_to(&path, &[job(1), job(2)]).unwrap();
+        let list = JobList {
+            jobs: vec![job(1), job(2)],
+            ..JobList::default()
+        };
+        save_jobs_to(&path, &list).unwrap();
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         value["jobs"]
             .as_array_mut()
             .unwrap()
-            .push(serde_json::json!({"id": 3, "kind": "from-the-future"}));
+            .push(serde_json::json!({"id": 9, "kind": "from-the-future"}));
+        value["jobs"][0]["priority"] = serde_json::json!(2);
+        value["schema"] = serde_json::json!(5);
         std::fs::write(&path, value.to_string()).unwrap();
-        match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => {
-                assert_eq!(jobs.len(), 2);
-                assert_eq!(jobs[0], job(1));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
+
+        let LoadJobs::Loaded(list) = load_jobs_from(&path) else {
+            panic!("expected a list");
+        };
+        assert_eq!(list.jobs.len(), 2);
+        assert_eq!(list.foreign.len(), 1);
+        assert_eq!(
+            list.max_id(),
+            9,
+            "unreadable records still reserve their id"
+        );
+        assert_eq!(list.jobs[0].extra["priority"], serde_json::json!(2));
+
+        save_jobs_to(&path, &list).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("from-the-future"));
+        assert!(text.contains("\"priority\": 2"));
+        assert!(text.contains("\"schema\": 5"));
     }
 
     #[test]

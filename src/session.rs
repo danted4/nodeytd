@@ -7,13 +7,14 @@
 //! reports through its `JobSnapshot`. Callers poll [`Session::drain_events`]
 //! and [`Session::persist`] periodically.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use crate::jobs::{self, LoadJobs, PersistedJob};
+use crate::jobs::{self, JobList, LoadJobs, PersistedJob};
 use crate::progress::{self, JobSnapshot, ProgressHandle, QUEUED, STARTING};
 use crate::request::DownloadRequest;
 use crate::slots::Slots;
@@ -28,6 +29,8 @@ pub struct Job {
     pub request: DownloadRequest,
     pub snapshot: Arc<JobSnapshot>,
     pub added: String,
+    /// Fields a newer version wrote on this record: written back as-is.
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 enum EngineCmd {
@@ -64,8 +67,23 @@ struct Inner {
     jobs: Vec<Job>,
     next_id: u64,
     tools: Option<ToolPaths>,
+    /// Records and top-level keys from `jobs.json` this version cannot read.
+    foreign: Vec<serde_json::Value>,
+    file_extra: BTreeMap<String, serde_json::Value>,
     last_persist: Option<Instant>,
     last_fingerprint: String,
+}
+
+impl Inner {
+    /// Another active job (other than `except`) writes the same file.
+    fn clashes(&self, request: &DownloadRequest, except: Option<u64>) -> bool {
+        self.jobs.iter().any(|job| {
+            Some(job.id) != except
+                && job.snapshot.is_active()
+                && job.request.dir == request.dir
+                && job.request.name == request.name
+        })
+    }
 }
 
 pub struct Session {
@@ -97,6 +115,8 @@ impl Session {
                 jobs: Vec::new(),
                 next_id: 1,
                 tools: None,
+                foreign: Vec::new(),
+                file_extra: BTreeMap::new(),
                 last_persist: None,
                 last_fingerprint: String::new(),
             })),
@@ -128,10 +148,13 @@ impl Session {
         match jobs::load_jobs_from(&self.jobs_path) {
             LoadJobs::Empty => Hydrate::Empty,
             LoadJobs::Corrupt(error) => Hydrate::Corrupt(error),
-            LoadJobs::Loaded(records) => {
+            LoadJobs::Loaded(list) => {
                 let mut inner = lock(&self.inner);
-                let count = records.len();
-                for record in records {
+                inner.next_id = inner.next_id.max(list.max_id() + 1);
+                inner.foreign = list.foreign;
+                inner.file_extra = list.extra;
+                let count = list.jobs.len();
+                for record in list.jobs {
                     let snapshot = Arc::new(JobSnapshot::default());
                     snapshot.set_title(record.request.title.clone());
                     snapshot.set_output(record.output.clone());
@@ -141,12 +164,12 @@ impl Session {
                         &record.status,
                         record.error.clone(),
                     );
-                    inner.next_id = inner.next_id.max(record.id + 1);
                     inner.jobs.push(Job {
                         id: record.id,
                         request: record.request,
                         snapshot,
                         added: record.added,
+                        extra: record.extra,
                     });
                 }
                 Hydrate::Loaded(count)
@@ -161,12 +184,7 @@ impl Session {
             .tools()
             .ok_or_else(|| "tools are not ready yet".to_string())?;
         let mut inner = lock(&self.inner);
-        let clash = inner.jobs.iter().any(|job| {
-            job.snapshot.is_active()
-                && job.request.dir == request.dir
-                && job.request.name == request.name
-        });
-        if clash {
+        if inner.clashes(&request, None) {
             return Err(format!("'{}' is already in the queue", request.name));
         }
         let id = inner.next_id;
@@ -179,6 +197,7 @@ impl Session {
             request: request.clone(),
             snapshot: Arc::clone(&snapshot),
             added,
+            extra: BTreeMap::new(),
         });
         drop(inner);
         self.dispatch(id, request, snapshot, tools);
@@ -212,26 +231,32 @@ impl Session {
             .cloned()
     }
 
-    /// Pause a running or queued job; resume a paused one.
-    pub fn toggle_pause(&self, id: u64) {
+    /// Pause a running or queued job; resume a paused one. Resuming needs
+    /// the tools: without them nothing changes and the reason comes back.
+    pub fn toggle_pause(&self, id: u64) -> Result<(), String> {
         let Some(job) = self.find(id) else {
-            return;
+            return Ok(());
         };
         if job.snapshot.is_finished() {
-            return;
+            return Ok(());
         }
         if job.snapshot.is_paused() {
+            let tools = self
+                .tools()
+                .ok_or_else(|| "tools are not ready yet".to_string())?;
             job.snapshot.set_paused(false);
             job.snapshot.set_status(QUEUED);
-            if let Some(tools) = self.tools() {
-                self.dispatch(id, job.request, job.snapshot, tools);
-            }
+            self.dispatch(id, job.request, job.snapshot, tools);
         } else {
             job.snapshot.set_paused(true);
             job.snapshot.set_status(progress::PAUSED);
         }
+        Ok(())
     }
 
+    /// Cancel a job. A running one is killed by its engine task, which also
+    /// removes the partial files; a paused, restored or waiting one has no
+    /// task, so its partial files are removed here (off the GUI thread).
     pub fn stop(&self, id: u64) {
         let Some(job) = self.find(id) else {
             return;
@@ -242,6 +267,23 @@ impl Session {
         job.snapshot.request_stop();
         if !job.snapshot.is_running() {
             job.snapshot.mark_stopped();
+            remove_partials_in_background(job.request);
+        }
+    }
+
+    /// Pause every running job and wait (up to `timeout`) for their yt-dlp
+    /// process trees to end, so closing the app never leaves one behind.
+    /// Paused jobs come back paused on the next start.
+    pub fn shutdown(&self, timeout: Duration) {
+        for job in self.jobs() {
+            if job.snapshot.is_active() && !job.snapshot.is_paused() {
+                job.snapshot.set_paused(true);
+                job.snapshot.set_status(progress::PAUSED);
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        while self.any_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -251,6 +293,17 @@ impl Session {
             .tools()
             .ok_or_else(|| "tools are not ready yet".to_string())?;
         let mut inner = lock(&self.inner);
+        let Some(request) = inner
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .map(|job| job.request.clone())
+        else {
+            return Err("no such job".into());
+        };
+        if inner.clashes(&request, Some(id)) {
+            return Err(format!("'{}' is already in the queue", request.name));
+        }
         let Some(job) = inner.jobs.iter_mut().find(|job| job.id == id) else {
             return Err("no such job".into());
         };
@@ -266,10 +319,19 @@ impl Session {
         Ok(())
     }
 
-    /// Drop a job from the list (stopping it first if needed). Downloaded
-    /// files stay on disk.
+    /// Drop a job from the list (stopping it first if needed). Finished
+    /// downloads stay on disk; an unfinished one's partial files go.
     pub fn remove(&self, id: u64) {
-        self.stop(id);
+        let Some(job) = self.find(id) else {
+            return;
+        };
+        if job.snapshot.is_finished() {
+            if !job.snapshot.is_done() {
+                remove_partials_in_background(job.request);
+            }
+        } else {
+            self.stop(id);
+        }
         lock(&self.inner).jobs.retain(|job| job.id != id);
         self.persist(true);
     }
@@ -314,13 +376,17 @@ impl Session {
         if !force && !due {
             return;
         }
-        let records: Vec<PersistedJob> = inner.jobs.iter().map(record).collect();
-        let fingerprint = serde_json::to_string(&records).unwrap_or_default();
+        let list = JobList {
+            jobs: inner.jobs.iter().map(record).collect(),
+            foreign: inner.foreign.clone(),
+            extra: inner.file_extra.clone(),
+        };
+        let fingerprint = serde_json::to_string(&list.jobs).unwrap_or_default();
         if fingerprint == inner.last_fingerprint {
             inner.last_persist = Some(Instant::now());
             return;
         }
-        if jobs::save_jobs_to(&self.jobs_path, &records).is_ok() {
+        if jobs::save_jobs_to(&self.jobs_path, &list).is_ok() {
             inner.last_fingerprint = fingerprint;
         }
         inner.last_persist = Some(Instant::now());
@@ -338,8 +404,14 @@ fn record(job: &Job) -> PersistedJob {
         total: snap.total.load(Ordering::Relaxed),
         output: snap.output(),
         error: snap.error(),
-        extra: Default::default(),
+        extra: job.extra.clone(),
     }
+}
+
+fn remove_partials_in_background(request: DownloadRequest) {
+    let _ = std::thread::Builder::new()
+        .name("ytd-cleanup".into())
+        .spawn(move || ytdlp::remove_partials(&request));
 }
 
 fn engine_loop(commands: Receiver<EngineCmd>, events: Sender<SessionEvent>, slots: Arc<Slots>) {
@@ -481,6 +553,7 @@ mod tests {
                 request: request("b"),
                 snapshot,
                 added: "now".into(),
+                extra: BTreeMap::new(),
             });
             session.persist(true);
         }
@@ -491,5 +564,97 @@ mod tests {
         assert!(jobs[0].snapshot.is_paused());
         session.stop(7);
         assert_eq!(session.jobs()[0].snapshot.status(), progress::STOPPED);
+    }
+
+    fn paused_job(session: &Session, id: u64, request: DownloadRequest) {
+        let snapshot = Arc::new(JobSnapshot::default());
+        snapshot.set_paused(true);
+        snapshot.set_status(progress::PAUSED);
+        lock(&session.inner).jobs.push(Job {
+            id,
+            request,
+            snapshot,
+            added: "now".into(),
+            extra: BTreeMap::new(),
+        });
+    }
+
+    #[test]
+    fn stopping_a_paused_job_removes_its_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::open(dir.path().join("jobs.json"), 1);
+        let mut req = request("clip");
+        req.dir = dir.path().to_path_buf();
+        std::fs::write(dir.path().join("clip.f140.m4a.part"), b"x").unwrap();
+        std::fs::write(dir.path().join("keep.mp3"), b"x").unwrap();
+        paused_job(&session, 1, req);
+        session.stop(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while dir.path().join("clip.f140.m4a.part").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!dir.path().join("clip.f140.m4a.part").exists());
+        assert!(dir.path().join("keep.mp3").exists());
+    }
+
+    #[test]
+    fn resume_without_tools_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::open(dir.path().join("jobs.json"), 1);
+        paused_job(&session, 1, request("a"));
+        assert!(session.toggle_pause(1).is_err());
+        let job = &session.jobs()[0];
+        assert!(job.snapshot.is_paused());
+        assert_eq!(job.snapshot.status(), progress::PAUSED);
+    }
+
+    #[test]
+    fn restart_refuses_a_name_another_active_job_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::open(dir.path().join("jobs.json"), 1);
+        session.set_tools(fake_tools(dir.path()));
+        let stopped = Arc::new(JobSnapshot::default());
+        stopped.mark_stopped();
+        lock(&session.inner).jobs.push(Job {
+            id: 1,
+            request: request("clip"),
+            snapshot: stopped,
+            added: "now".into(),
+            extra: BTreeMap::new(),
+        });
+        paused_job(&session, 2, request("clip"));
+        let error = session.restart(1).unwrap_err();
+        assert!(error.contains("already in the queue"));
+    }
+
+    #[test]
+    fn unknown_fields_survive_hydrate_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        {
+            let session = Session::open(path.clone(), 1);
+            paused_job(&session, 3, request("a"));
+            session.persist(true);
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value["jobs"][0]["priority"] = serde_json::json!(2);
+        value["jobs"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": 40, "kind": "torrent"}));
+        value["schema"] = serde_json::json!(5);
+        std::fs::write(&path, value.to_string()).unwrap();
+
+        let session = Session::open(path.clone(), 1);
+        session.hydrate();
+        session.set_tools(fake_tools(dir.path()));
+        let id = session.queue(request("b")).unwrap();
+        assert!(id > 40, "ids of unreadable records stay reserved");
+        session.persist(true);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"priority\": 2"));
+        assert!(text.contains("\"torrent\""));
+        assert!(text.contains("\"schema\": 5"));
     }
 }

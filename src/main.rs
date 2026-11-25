@@ -220,11 +220,25 @@ async fn fetch(tools: &ToolPaths, url: &str) -> Result<VideoInfo> {
 
 async fn download(tools: &ToolPaths, request: &DownloadRequest) -> Result<()> {
     let progress = ProgressHandle::cli("starting");
+    // yt-dlp runs detached from the console (its own process group / no
+    // window), so Ctrl-C never reaches it: turn Ctrl-C into a stop, which
+    // kills its process tree and removes the partial files.
+    if let Some(control) = progress.control() {
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                control.request_stop();
+            }
+        });
+    }
     match ytdlp::download(tools, request, &progress).await {
         Ok(path) => {
             progress.finish();
             println!("Saved as {}", path.display());
             Ok(())
+        }
+        Err(error) if ytd::progress::is_stopped(&error) => {
+            progress.abandon();
+            bail!("cancelled; partial files removed")
         }
         Err(error) => {
             progress.abandon();

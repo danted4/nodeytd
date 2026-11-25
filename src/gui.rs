@@ -384,6 +384,8 @@ fn row_accent(palette: Theme, settled: bool) -> Color32 {
 // ---------------------------------------------------------------- worker
 
 enum WorkerCmd {
+    /// Install what is missing, or (`update: true`) re-install exactly the
+    /// tools listed in `progress`.
     Tools {
         update: bool,
         progress: Vec<(Tool, Arc<JobSnapshot>)>,
@@ -414,6 +416,8 @@ enum WorkerEvent {
     AppInstalled(Result<String, String>),
     Info {
         seq: u64,
+        /// The URL this info is for: the text box may have changed since.
+        url: String,
         result: Result<VideoInfo, String>,
     },
     Thumb {
@@ -444,18 +448,19 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                             .unwrap_or(ProgressHandle::Hidden)
                     };
                     let result = if update {
-                        tools::update_all(handle_for).await
+                        let wanted: Vec<Tool> = progress.iter().map(|(t, _)| *t).collect();
+                        tools::update_tools(&wanted, handle_for).await
                     } else {
                         tools::install_missing(handle_for).await
                     };
                     WorkerEvent::ToolsDone(result.map_err(|e| format!("{e:#}")))
                 }
-                WorkerCmd::Fetch { seq, url, tools } => WorkerEvent::Info {
-                    seq,
-                    result: ytdlp::fetch_info(&tools, &url)
+                WorkerCmd::Fetch { seq, url, tools } => {
+                    let result = ytdlp::fetch_info(&tools, &url)
                         .await
-                        .map_err(|e| format!("{e:#}")),
-                },
+                        .map_err(|e| format!("{e:#}"));
+                    WorkerEvent::Info { seq, url, result }
+                }
                 WorkerCmd::Thumb { seq, url } => WorkerEvent::Thumb {
                     seq,
                     result: fetch_thumbnail(&url).await.map_err(|e| format!("{e:#}")),
@@ -668,7 +673,7 @@ pub struct GuiApp {
     /// The auto-update check already ran this session.
     checked_updates: bool,
     /// Outdated tools wait here until no download is running.
-    tool_update_pending: bool,
+    tool_update_pending: Vec<Tool>,
 }
 
 impl GuiApp {
@@ -701,13 +706,13 @@ impl GuiApp {
             max_downloads: crate::slots::clamp_max_downloads(max_downloads),
             auto_update: cfg.auto_update,
             checked_updates: false,
-            tool_update_pending: false,
+            tool_update_pending: Vec::new(),
         };
         if let Hydrate::Corrupt(error) = app.session.hydrate() {
             app.toast_fail(format!("saved list was unreadable and was reset: {error}"));
         }
         apply_theme(&cc.egui_ctx, theme(app.theme));
-        app.setup_tools(false);
+        app.setup_tools(None);
         app
     }
 
@@ -744,15 +749,16 @@ impl GuiApp {
 
     // ------------------------------------------------------------- tools
 
-    /// Install missing tools (or update ours), one loader toast per tool.
-    fn setup_tools(&mut self, update: bool) {
-        let wanted: Vec<Tool> = if update {
-            tools::managed()
-        } else {
-            tools::missing()
+    /// Install missing tools, or re-install `update`'s tools, with one
+    /// loader toast per tool.
+    fn setup_tools(&mut self, update: Option<Vec<Tool>>) {
+        let is_update = update.is_some();
+        let wanted: Vec<Tool> = match update {
+            Some(list) => list,
+            None => tools::missing()
                 .into_iter()
                 .filter(|tool| tools::can_install(*tool))
-                .collect()
+                .collect(),
         };
         if wanted.is_empty() {
             match tools::resolve() {
@@ -773,7 +779,7 @@ impl GuiApp {
             .iter()
             .map(|tool| (*tool, Arc::new(JobSnapshot::default())))
             .collect();
-        let verb = if update { "updating" } else { "installing" };
+        let verb = if is_update { "updating" } else { "installing" };
         for (tool, snap) in &progress {
             snap.set_status(progress::STARTING);
             self.push_toast(
@@ -784,7 +790,10 @@ impl GuiApp {
             );
         }
         self.tools_state = ToolsState::Installing;
-        let _ = self.tx.send(WorkerCmd::Tools { update, progress });
+        let _ = self.tx.send(WorkerCmd::Tools {
+            update: is_update,
+            progress,
+        });
     }
 
     fn tools_ready(&mut self, paths: ToolPaths, announce: bool) {
@@ -851,7 +860,7 @@ impl GuiApp {
             Err(error) => self.toast_fail(format!("update check failed: {error}")),
         }
         if !stale.is_empty() {
-            self.tool_update_pending = true;
+            self.tool_update_pending = stale;
         }
     }
 
@@ -888,13 +897,16 @@ impl GuiApp {
                         Ok(paths) => self.tools_ready(paths, true),
                         Err(error) => {
                             self.toast_fail(error.clone());
-                            self.tools_state = ToolsState::Failed(error);
+                            // An update that failed leaves the old tools in place.
+                            match tools::resolve() {
+                                Ok(paths) => self.tools_ready(paths, false),
+                                Err(_) => self.tools_state = ToolsState::Failed(error),
+                            }
                         }
                     }
                 }
-                WorkerEvent::Info { seq, result } if seq == self.fetch_seq => match result {
+                WorkerEvent::Info { seq, url, result } if seq == self.fetch_seq => match result {
                     Ok(info) => {
-                        let url = self.url.trim().to_string();
                         let thumb = info.thumbnail_url();
                         self.fetch = Fetch::Ready(Box::new(Draft::new(url, info)));
                         if let Some(thumb) = thumb {
@@ -1038,7 +1050,7 @@ impl GuiApp {
             .show(ui, |ui| {
                 ui.label(RichText::new(error).color(palette.fail));
                 if ui.button("retry").clicked() {
-                    self.setup_tools(false);
+                    self.setup_tools(None);
                 }
             });
         ui.add_space(6.0);
@@ -1129,7 +1141,11 @@ impl GuiApp {
             });
         for action in actions {
             match action {
-                RowAction::TogglePause(id) => self.session.toggle_pause(id),
+                RowAction::TogglePause(id) => {
+                    if let Err(error) = self.session.toggle_pause(id) {
+                        self.toast_fail(error);
+                    }
+                }
                 RowAction::Stop(id) => self.session.stop(id),
                 RowAction::Restart(id) => {
                     if let Err(error) = self.session.restart(id) {
@@ -1245,7 +1261,7 @@ impl GuiApp {
             self.save_settings();
         }
         if update_tools {
-            self.setup_tools(true);
+            self.setup_tools(Some(tools::managed()));
         }
     }
 
@@ -1625,12 +1641,12 @@ impl eframe::App for GuiApp {
         self.drain_events(ctx);
         self.session.persist(false);
         // Outdated tools found by auto-update: replace them once idle.
-        if self.tool_update_pending
+        if !self.tool_update_pending.is_empty()
             && matches!(self.tools_state, ToolsState::Ready)
             && !self.session.any_running()
         {
-            self.tool_update_pending = false;
-            self.setup_tools(true);
+            let stale = std::mem::take(&mut self.tool_update_pending);
+            self.setup_tools(Some(stale));
         }
 
         egui::TopBottomPanel::top("top")
@@ -1673,6 +1689,10 @@ impl eframe::App for GuiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Pause running jobs and wait for their yt-dlp/ffmpeg trees to end,
+        // so nothing keeps writing after the window is gone. They come back
+        // paused next time.
+        self.session.shutdown(Duration::from_secs(5));
         self.session.persist(true);
     }
 }

@@ -17,7 +17,7 @@ macos-app = []
 
 [dependencies]
 anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 dialoguer = { version = "0.11", default-features = false }
 dirs = "6"
@@ -33,7 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = { version = "0.4", default-features = false }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 # eframe 0.31 does not re-export `winit/default`; this unifies Linux CSD.
 winit = { version = "0.30", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
