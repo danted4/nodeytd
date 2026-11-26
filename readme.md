@@ -4,6 +4,41 @@ Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.
 
 Windows, macOS and Linux.
 
+**rustYTD gui**
+
+![rustYTD gui: a video preview with format choices above a queue with two downloads running and one paused](docs/gui-4.0.0.png)
+
+<table>
+   <tr>
+   <th>
+      queue (phosphor theme)
+   </th>
+   <th>
+      settings
+   </th>
+   </tr>
+   <tr>
+   <td>
+      <img src="docs/queue-4.0.0.png" alt="Queue in the green phosphor theme: two finished downloads and one paused" height="220">
+   </td>
+   <td>
+      <img src="docs/settings-4.0.0.png" alt="Settings: download folder, downloads at once, colour themes and YouTube sign-in" height="220">
+   </td>
+   </tr>
+   <tr>
+   <th colspan="2">
+      rustYTD cli
+   </th>
+   </tr>
+   <tr>
+   <td colspan="2">
+      <img src="docs/cli-4.0.0.png" alt="ytd get downloading a 30-second mp3 clip from the command line">
+   </td>
+   </tr>
+</table>
+
+Screenshots use Blender Studio's open movies (Creative Commons).
+
 ## Prerequisite
 
 - **Nothing to install on Windows and Linux.** On first run ytd downloads yt-dlp, ffmpeg and deno (the JavaScript runtime yt-dlp uses for YouTube) into its own folder. Each file is checked against its publisher's SHA-256 checksums.
