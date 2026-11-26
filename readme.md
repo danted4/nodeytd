@@ -51,7 +51,7 @@ Top bar:
 
 YouTube sometimes asks a computer to prove it is not a bot, especially after a lot of downloading. ytd then shows **YouTube wants a signed-in browser**, listing the browsers installed on your computer:
 
-- Pick the browser you use YouTube in. ytd reads that browser's YouTube cookies from its profile on disk (no browser window opens) and sends them only to YouTube.
+- Pick the browser you use YouTube in. ytd reads that browser's YouTube cookies from its profile on disk (no browser window opens) and sends them only to YouTube: links to other sites never get them.
 - Each choice is tested before it is saved. If it fails, ytd says why and what to do next (for example: close the browser, or that the browser encrypts its cookies).
 - **import cookies.txt…** works with any browser: export youtube.com cookies in Netscape (cookies.txt) format with a cookies.txt browser extension and pick the file.
 - Change it, or stop using it, in settings → **YouTube sign-in**.
@@ -88,6 +88,7 @@ Ctrl-C cancels a download and removes its partial files.
 ## Where things go
 
 - **Downloads:** `Downloads/rustYTD` (change it in settings).
+- **Unfinished downloads:** each one keeps its partial files in its own folder under `.ytd-parts` inside the download folder. Stop or remove deletes that folder only; finished files are never touched.
 - **Settings, job list and tools:**
   - Windows: `%APPDATA%\ytd`
   - macOS: `~/Library/Application Support/ytd`

@@ -267,7 +267,15 @@ impl Session {
         job.snapshot.request_stop();
         if !job.snapshot.is_running() {
             job.snapshot.mark_stopped();
-            remove_partials_in_background(job.request);
+            self.clean_up(id, job.request);
+        }
+    }
+
+    /// Delete a dead job's partial files, unless a newer active job with the
+    /// same name and folder is now using that partial folder.
+    fn clean_up(&self, id: u64, request: DownloadRequest) {
+        if !lock(&self.inner).clashes(&request, Some(id)) {
+            remove_partials_in_background(request);
         }
     }
 
@@ -327,7 +335,7 @@ impl Session {
         };
         if job.snapshot.is_finished() {
             if !job.snapshot.is_done() {
-                remove_partials_in_background(job.request);
+                self.clean_up(id, job.request);
             }
         } else {
             self.stop(id);
@@ -414,6 +422,12 @@ fn remove_partials_in_background(request: DownloadRequest) {
         .spawn(move || ytdlp::remove_partials(&request));
 }
 
+async fn stop_and_clean(snapshot: &JobSnapshot, request: &DownloadRequest) {
+    let request = request.clone();
+    let _ = tokio::task::spawn_blocking(move || ytdlp::remove_partials(&request)).await;
+    snapshot.mark_stopped();
+}
+
 fn engine_loop(commands: Receiver<EngineCmd>, events: Sender<SessionEvent>, slots: Arc<Slots>) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -467,7 +481,11 @@ async fn run_job(
                     path,
                 });
             }
-            Err(error) if progress::is_stopped(&error) => snapshot.mark_stopped(),
+            // Also reached when the stop came while waiting for a slot, before
+            // yt-dlp (and its own cleanup) ever ran for this resume.
+            Err(error) if progress::is_stopped(&error) => {
+                stop_and_clean(&snapshot, &request).await;
+            }
             Err(error) if progress::is_pause_abort(&error) => {
                 snapshot.set_status(progress::PAUSED);
             }
@@ -482,6 +500,12 @@ async fn run_job(
             }
         }
         snapshot.release_claim();
+        // A stop that landed after yt-dlp's last look at the flags (it was
+        // ending for a pause): `stop` saw the job running and left it to us.
+        if snapshot.should_stop() && !snapshot.is_finished() {
+            stop_and_clean(&snapshot, &request).await;
+            return;
+        }
         // Resumed while we were winding down: take the job again.
         let resumed = !snapshot.is_finished() && !snapshot.is_paused() && !snapshot.should_stop();
         if resumed && snapshot.try_claim() {
@@ -584,18 +608,78 @@ mod tests {
     fn stopping_a_paused_job_removes_its_partial_files() {
         let dir = tempfile::tempdir().unwrap();
         let session = Session::open(dir.path().join("jobs.json"), 1);
-        let mut req = request("clip");
-        req.dir = dir.path().to_path_buf();
-        std::fs::write(dir.path().join("clip.f140.m4a.part"), b"x").unwrap();
-        std::fs::write(dir.path().join("keep.mp3"), b"x").unwrap();
+        let req = request_with_partial(dir.path(), "clip");
+        let parts = req.partial_dir();
+        std::fs::write(dir.path().join("clip.mp4"), b"x").unwrap();
         paused_job(&session, 1, req);
         session.stop(1);
+        wait_until_gone(&parts);
+        assert!(!parts.exists());
+        assert!(
+            dir.path().join("clip.mp4").exists(),
+            "finished file of the same name stays"
+        );
+    }
+
+    fn request_with_partial(dir: &std::path::Path, name: &str) -> DownloadRequest {
+        let mut req = request(name);
+        req.dir = dir.to_path_buf();
+        std::fs::create_dir_all(req.partial_dir()).unwrap();
+        std::fs::write(req.partial_dir().join(format!("{name}.webm.part")), b"x").unwrap();
+        req
+    }
+
+    fn wait_until_gone(path: &std::path::Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while dir.path().join("clip.f140.m4a.part").exists() && Instant::now() < deadline {
+        while path.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(!dir.path().join("clip.f140.m4a.part").exists());
-        assert!(dir.path().join("keep.mp3").exists());
+    }
+
+    #[test]
+    fn stopping_a_resumed_job_waiting_for_a_slot_removes_its_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::open(dir.path().join("jobs.json"), 1);
+        session.set_tools(fake_tools(dir.path()));
+        // Another download holds the only slot.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _held = runtime
+            .block_on(session.slots.acquire(&JobSnapshot::default()))
+            .unwrap();
+        let req = request_with_partial(dir.path(), "clip");
+        let parts = req.partial_dir();
+        paused_job(&session, 1, req);
+        session.toggle_pause(1).unwrap();
+        let snapshot = session.jobs()[0].snapshot.clone();
+        assert!(snapshot.is_running(), "claimed, waiting for the slot");
+        session.stop(1);
+        wait_until_gone(&parts);
+        assert!(!parts.exists());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while snapshot.status() != progress::STOPPED && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(snapshot.status(), progress::STOPPED);
+    }
+
+    #[test]
+    fn removing_an_old_job_keeps_the_partials_of_an_active_one_with_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::open(dir.path().join("jobs.json"), 1);
+        let req = request_with_partial(dir.path(), "clip");
+        let failed = Arc::new(JobSnapshot::default());
+        failed.set_error("boom");
+        lock(&session.inner).jobs.push(Job {
+            id: 1,
+            request: req.clone(),
+            snapshot: failed,
+            added: "now".into(),
+            extra: BTreeMap::new(),
+        });
+        paused_job(&session, 2, req.clone());
+        session.remove(1);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(req.partial_dir().exists(), "job 2 still needs them");
     }
 
     #[test]

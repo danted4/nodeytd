@@ -135,10 +135,21 @@ impl DownloadRequest {
         }
     }
 
+    /// This job's own folder for everything yt-dlp writes before the final
+    /// move: `.part` files, the streams of a merge, an mp3 job's source
+    /// audio. Cleanup deletes this folder and nothing else, so a finished
+    /// file in the download folder can never be mistaken for a leftover.
+    pub fn partial_dir(&self) -> PathBuf {
+        self.dir.join(PARTS_DIR).join(&self.name)
+    }
+
     /// Every yt-dlp argument for this download, URL last.
     pub fn ytdlp_args(&self, tools: &ToolPaths) -> Vec<OsString> {
-        let mut args: Vec<OsString> = common_args(tools);
-        let output = self.dir.join(format!("{}.%(ext)s", self.name));
+        let mut args: Vec<OsString> = common_args(tools, &self.url);
+        let mut home = OsString::from("home:");
+        home.push(self.dir.as_os_str());
+        let mut temp = OsString::from("temp:");
+        temp.push(self.partial_dir().as_os_str());
         args.extend(
             [
                 "--no-playlist",
@@ -174,16 +185,41 @@ impl DownloadRequest {
             args.push(sections.into());
             args.push("--force-keyframes-at-cuts".into());
         }
+        // `-o` must stay relative: an absolute template makes yt-dlp ignore
+        // both paths and write the partial files next to the final one.
+        args.push("-P".into());
+        args.push(home);
+        args.push("-P".into());
+        args.push(temp);
         args.push("-o".into());
-        args.push(output.into_os_string());
+        args.push(format!("{}.%(ext)s", self.name).into());
         args.push("--".into());
         args.push(self.url.clone().into());
         args
     }
 }
 
-/// Arguments every yt-dlp call gets: our ffmpeg and deno, UTF-8 output.
-pub fn common_args(tools: &ToolPaths) -> Vec<OsString> {
+/// Folder (inside the download folder) that holds each job's partial files.
+pub const PARTS_DIR: &str = ".ytd-parts";
+
+/// YouTube's own hosts. The sign-in cookies are only passed for these.
+pub fn is_youtube_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    ["youtube.com", "youtu.be", "youtube-nocookie.com"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// Arguments every yt-dlp call for `url` gets: our ffmpeg and deno, UTF-8
+/// output, and the YouTube sign-in when `url` is a YouTube link (other
+/// sites never get the browser's cookies).
+pub fn common_args(tools: &ToolPaths, url: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "--encoding".into(),
         "utf-8".into(),
@@ -197,7 +233,7 @@ pub fn common_args(tools: &ToolPaths) -> Vec<OsString> {
         args.push("--js-runtimes".into());
         args.push(runtime);
     }
-    if let Some(cookies) = &tools.cookies {
+    if let Some(cookies) = tools.cookies.as_ref().filter(|_| is_youtube_url(url)) {
         args.extend(cookies.args());
     }
     args
@@ -271,9 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_is_passed_to_every_call() {
+    fn sign_in_is_passed_to_youtube_only() {
         let mut with_cookies = tools();
-        assert!(!strings(&common_args(&with_cookies))
+        let youtube = "https://www.youtube.com/watch?v=x";
+        assert!(!strings(&common_args(&with_cookies, youtube))
             .join(" ")
             .contains("--cookies"));
         with_cookies.cookies = Some(crate::cookies::CookieSource::Browser {
@@ -281,6 +318,45 @@ mod tests {
         });
         let joined = strings(&request(DownloadKind::Merged).ytdlp_args(&with_cookies)).join(" ");
         assert!(joined.contains("--cookies-from-browser firefox"));
+        for other in [
+            "https://vimeo.com/1",
+            "https://notyoutube.com/watch?v=x",
+            "https://youtube.com.evil.example/watch?v=x",
+            "not a url",
+        ] {
+            let joined = strings(&common_args(&with_cookies, other)).join(" ");
+            assert!(!joined.contains("--cookies"), "{other}");
+        }
+    }
+
+    #[test]
+    fn youtube_hosts() {
+        assert!(is_youtube_url("https://youtu.be/x"));
+        assert!(is_youtube_url("https://music.youtube.com/watch?v=x"));
+        assert!(is_youtube_url("https://m.YouTube.com./watch?v=x"));
+        assert!(is_youtube_url("https://www.youtube-nocookie.com/embed/x"));
+        assert!(!is_youtube_url("https://fakeyoutube.com/x"));
+    }
+
+    #[test]
+    fn partial_files_go_to_the_jobs_own_folder() {
+        let req = request(DownloadKind::Merged);
+        assert_eq!(
+            req.partial_dir(),
+            PathBuf::from("/out").join(".ytd-parts").join("zoo")
+        );
+        let args = strings(&req.ytdlp_args(&tools()));
+        let at = |flag: &str| args.iter().position(|a| a == flag).unwrap();
+        assert_eq!(args[at("-o") + 1], "zoo.%(ext)s", "relative, so -P applies");
+        let paths: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && args[i - 1] == "-P")
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].starts_with("home:") && paths[0].ends_with("out"));
+        assert!(paths[1].starts_with("temp:") && paths[1].ends_with("zoo"));
     }
 
     #[test]
