@@ -57,7 +57,17 @@ pub struct ToolRecord {
     pub installed_at: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub const GLASS_TINT_MIN: u8 = 40;
+pub const GLASS_TINT_MAX: u8 = 210;
+/// 60% of the min..=max range (still 40–210).
+pub const GLASS_TINT_DEFAULT: u8 =
+    GLASS_TINT_MIN + ((GLASS_TINT_MAX - GLASS_TINT_MIN) as u16 * 60 / 100) as u8;
+
+fn default_glass_tint() -> u8 {
+    GLASS_TINT_DEFAULT
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,9 +84,76 @@ pub struct AppConfig {
     pub cookies: Option<crate::cookies::CookieSource>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, ToolRecord>,
+    /// How heavily the theme colour sits on the macOS window blur
+    /// (`GLASS_TINT_MIN..=GLASS_TINT_MAX`). Windows and Linux are opaque.
+    #[serde(
+        default = "default_glass_tint",
+        deserialize_with = "lenient_glass_tint"
+    )]
+    pub glass_tint: u8,
     /// Keys a newer version wrote: kept on rewrite.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            download_dir: None,
+            max_downloads: None,
+            theme: None,
+            auto_update: false,
+            cookies: None,
+            tools: BTreeMap::new(),
+            glass_tint: GLASS_TINT_DEFAULT,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+// ------------------------------------------------- window tint (torrenter)
+
+pub fn normalize_glass_tint(value: u8) -> u8 {
+    value.clamp(GLASS_TINT_MIN, GLASS_TINT_MAX)
+}
+
+pub fn glass_tint_percent(value: u8) -> u8 {
+    let value = u16::from(normalize_glass_tint(value));
+    let span = u16::from(GLASS_TINT_MAX - GLASS_TINT_MIN);
+    ((value - u16::from(GLASS_TINT_MIN)) * 100 / span) as u8
+}
+
+pub fn glass_tint_from_percent(percent: u8) -> u8 {
+    let percent = u16::from(percent.min(100));
+    let span = u16::from(GLASS_TINT_MAX - GLASS_TINT_MIN);
+    GLASS_TINT_MIN + (percent * span / 100) as u8
+}
+
+/// Paint tint: native fullscreen uses 100%; otherwise the saved windowed value.
+pub fn effective_glass_tint(saved: u8, fullscreen: bool) -> u8 {
+    if fullscreen {
+        glass_tint_from_percent(100)
+    } else {
+        normalize_glass_tint(saved)
+    }
+}
+
+/// Windows has no frost. Ignore a leftover slider value and use 100%.
+pub fn windows_glass_tint(_saved: u8) -> u8 {
+    glass_tint_from_percent(100)
+}
+
+/// A hand-edited `glassTint` (300, 60.5, -1, "x") must not make the whole
+/// file unreadable: clamp a number, default anything else.
+fn lenient_glass_tint<'de, D>(deserializer: D) -> std::result::Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .map(|number| normalize_glass_tint(number.clamp(0.0, 255.0).round() as u8))
+        .unwrap_or(GLASS_TINT_DEFAULT))
 }
 
 impl AppConfig {
@@ -140,6 +217,59 @@ pub(crate) mod test_env {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glass_tint_clamps_and_defaults() {
+        assert_eq!(normalize_glass_tint(0), GLASS_TINT_MIN);
+        assert_eq!(normalize_glass_tint(255), GLASS_TINT_MAX);
+        assert_eq!(glass_tint_from_percent(0), GLASS_TINT_MIN);
+        assert_eq!(glass_tint_from_percent(100), GLASS_TINT_MAX);
+        assert_eq!(glass_tint_from_percent(60), GLASS_TINT_DEFAULT);
+        assert_eq!(glass_tint_percent(GLASS_TINT_DEFAULT), 60);
+        let parsed: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.glass_tint, GLASS_TINT_DEFAULT);
+        assert_eq!(AppConfig::default().glass_tint, GLASS_TINT_DEFAULT);
+        let config = AppConfig {
+            glass_tint: 90,
+            ..AppConfig::default()
+        };
+        let parsed: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(parsed.glass_tint, 90);
+    }
+
+    #[test]
+    fn fullscreen_uses_max_tint_without_changing_saved() {
+        let saved = glass_tint_from_percent(60);
+        assert_eq!(effective_glass_tint(saved, true), GLASS_TINT_MAX);
+        assert_eq!(effective_glass_tint(saved, false), saved);
+        assert_eq!(saved, GLASS_TINT_DEFAULT);
+    }
+
+    #[test]
+    fn odd_glass_tint_values_do_not_reset_the_file() {
+        for (raw, want) in [
+            ("300", GLASS_TINT_MAX),
+            ("-1", GLASS_TINT_MIN),
+            ("60.5", 61),
+            ("100", 100),
+            ("\"x\"", GLASS_TINT_DEFAULT),
+            ("null", GLASS_TINT_DEFAULT),
+        ] {
+            let parsed: AppConfig =
+                serde_json::from_str(&format!(r#"{{"glassTint":{raw},"theme":"ice"}}"#))
+                    .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(parsed.glass_tint, want, "{raw}");
+            assert_eq!(parsed.theme.as_deref(), Some("ice"), "other keys survive");
+        }
+    }
+
+    #[test]
+    fn windows_tint_snaps_to_max_regardless_of_saved() {
+        assert_eq!(windows_glass_tint(0), GLASS_TINT_MAX);
+        assert_eq!(windows_glass_tint(GLASS_TINT_DEFAULT), GLASS_TINT_MAX);
+        assert_eq!(glass_tint_percent(windows_glass_tint(90)), 100);
+    }
 
     #[test]
     fn round_trip_keeps_unknown_keys() {

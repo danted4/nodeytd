@@ -7,7 +7,7 @@
 //! downloads run inside [`Session`].
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,16 +39,26 @@ const GUTTER: f32 = 12.0;
 /// Room the × glyph takes at the right end of the URL box (beyond the usual
 /// 8 px text margin), so typed text stops short of it.
 const CLEAR_GLYPH_ROOM: f32 = 16.0;
+/// Frames to retry installing the macOS window glass before giving up.
+const GLASS_ATTEMPTS: u32 = 120;
+
+fn viewport() -> egui::ViewportBuilder {
+    let viewport = egui::ViewportBuilder::default()
+        .with_app_id("ytd")
+        .with_title(crate::banner())
+        .with_inner_size(WINDOW_INNER)
+        .with_min_inner_size(WINDOW_MIN)
+        .with_icon(Arc::new(crate::icon::app_icon()));
+    // The window glass shows through a transparent surface (macOS only).
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_transparent(true);
+    viewport
+}
 
 pub fn run() -> eframe::Result<()> {
     update::cleanup_replaced_binary();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_app_id("ytd")
-            .with_title(crate::banner())
-            .with_inner_size(WINDOW_INNER)
-            .with_min_inner_size(WINDOW_MIN)
-            .with_icon(Arc::new(crate::icon::app_icon())),
+        viewport: viewport(),
         // Linux compositors can miss frames with vsync on (as in torrenter).
         vsync: !cfg!(target_os = "linux"),
         ..Default::default()
@@ -163,20 +173,50 @@ fn mix_rgb(a: Color32, b: Color32, toward_b: f32) -> Color32 {
     )
 }
 
-fn apply_theme(ctx: &egui::Context, palette: Theme) {
+/// Startup tint: clamped, and 100% on Windows (no frost there; torrenter).
+/// Only in memory: the tint is not painted off macOS, so config.json is
+/// left alone.
+fn initial_glass_tint(saved: u8) -> u8 {
+    let tint = config::normalize_glass_tint(saved);
+    if cfg!(windows) {
+        config::windows_glass_tint(tint)
+    } else {
+        tint
+    }
+}
+
+/// `color` at the glass alpha (macOS), or as is.
+fn surface(color: Color32, tint: Option<u8>) -> Color32 {
+    match tint {
+        #[cfg(target_os = "macos")]
+        Some(alpha) => crate::glass::tint(color, alpha),
+        _ => color,
+    }
+}
+
+/// Cards, toasts and rows: nearly opaque, so text stays readable over the
+/// glass without a wash (torrenter's `card_fill`).
+fn card_fill(color: Color32) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 236)
+}
+
+fn apply_theme(ctx: &egui::Context, palette: Theme, tint: Option<u8>) {
     let mut visuals = egui::Visuals::dark();
+    let glass = |color| surface(color, tint);
     visuals.override_text_color = Some(palette.fg);
-    visuals.panel_fill = palette.bg;
+    visuals.panel_fill = glass(palette.bg);
+    // Tooltips and popups draw with window_fill: keep it solid so they stay
+    // readable over the glass. The panels carry the glass.
     visuals.window_fill = palette.bg;
-    visuals.extreme_bg_color = palette.row;
-    visuals.faint_bg_color = palette.row_alt;
-    visuals.widgets.inactive.bg_fill = palette.row;
-    visuals.widgets.inactive.weak_bg_fill = palette.row;
-    visuals.widgets.hovered.bg_fill = palette.row_alt;
-    visuals.widgets.hovered.weak_bg_fill = palette.row_alt;
-    visuals.widgets.active.bg_fill = palette.row_alt;
-    visuals.widgets.active.weak_bg_fill = palette.row_alt;
-    visuals.widgets.open.bg_fill = palette.row_alt;
+    visuals.extreme_bg_color = glass(palette.row);
+    visuals.faint_bg_color = glass(palette.row_alt);
+    visuals.widgets.inactive.bg_fill = glass(palette.row);
+    visuals.widgets.inactive.weak_bg_fill = glass(palette.row);
+    visuals.widgets.hovered.bg_fill = glass(palette.row_alt);
+    visuals.widgets.hovered.weak_bg_fill = glass(palette.row_alt);
+    visuals.widgets.active.bg_fill = glass(palette.row_alt);
+    visuals.widgets.active.weak_bg_fill = glass(palette.row_alt);
+    visuals.widgets.open.bg_fill = glass(palette.row_alt);
     visuals.selection.bg_fill =
         Color32::from_rgba_unmultiplied(palette.fg.r(), palette.fg.g(), palette.fg.b(), 40);
     visuals.selection.stroke = Stroke::new(1.0_f32, palette.fg);
@@ -268,6 +308,7 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, active: bool) -> egui::Respon
         palette.dim
     };
     let painter = ui.painter();
+    paint_brush_stroke(painter, rect.shrink(1.5));
     let stroke = Stroke::new(1.3_f32, color);
     let c = rect.center();
     painter.circle_stroke(c, 4.8, stroke);
@@ -390,6 +431,9 @@ fn row_accent(palette: Theme, settled: bool) -> Color32 {
 
 // ---------------------------------------------------------------- worker
 
+/// One change to `config.json`, run on the worker.
+type ConfigEdit = Box<dyn FnOnce(&mut config::AppConfig) + Send>;
+
 enum WorkerCmd {
     /// Install what is missing, or (`update: true`) re-install exactly the
     /// tools listed in `progress`.
@@ -418,8 +462,12 @@ enum WorkerCmd {
         url: String,
         tools: ToolPaths,
     },
-    /// Write the download folder to `config.json` off the GUI thread.
-    SaveDownloadDir(PathBuf),
+    /// Change `config.json` off the GUI thread; `pending` drops by one when
+    /// the write is done.
+    EditConfig {
+        change: ConfigEdit,
+        pending: Arc<AtomicUsize>,
+    },
 }
 
 enum WorkerEvent {
@@ -456,6 +504,20 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
         return;
     };
     while let Ok(command) = commands.recv() {
+        // Config writes run here, one at a time in the order they were sent:
+        // two quick changes to one setting must not land out of order.
+        let command = match command {
+            WorkerCmd::EditConfig { change, pending } => {
+                let result = config::edit_config(change)
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                pending.fetch_sub(1, Ordering::SeqCst);
+                let _ = events.send(WorkerEvent::ConfigSaved(result));
+                ctx.request_repaint();
+                continue;
+            }
+            other => other,
+        };
         let events = events.clone();
         let ctx = ctx.clone();
         runtime.spawn(async move {
@@ -497,16 +559,8 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                     let result = ytdlp::test_cookies(&tools, &source, &url).await;
                     WorkerEvent::CookiesTested { source, result }
                 }
-                WorkerCmd::SaveDownloadDir(dir) => {
-                    let result = tokio::task::spawn_blocking(move || {
-                        config::edit_config(move |cfg| cfg.download_dir = Some(dir))
-                            .map(|_| ())
-                            .map_err(|e| format!("{e:#}"))
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    WorkerEvent::ConfigSaved(result)
-                }
+                // Handled in order before spawning, above.
+                WorkerCmd::EditConfig { .. } => return,
                 WorkerCmd::InstallApp {
                     update: available,
                     snapshot,
@@ -722,6 +776,54 @@ pub struct GuiApp {
     cookie_retry: Option<String>,
     /// Filters the queue; not saved.
     job_query: String,
+    settings_tab: SettingsTab,
+    /// Tool versions and paths for the updates tab: read when settings
+    /// opens or the tools change, never on every frame.
+    tool_rows: Option<Vec<ToolRow>>,
+    /// macOS window glass (torrenter): saved tint, and what is painted now.
+    glass_tint: u8,
+    glass_applied: bool,
+    glass_attempts: u32,
+    viewport_fullscreen: bool,
+    applied_style: Option<(ThemeId, Option<u8>)>,
+    /// `config.json` writes sent to the worker and not done yet: quitting
+    /// waits for them.
+    pending_saves: Arc<AtomicUsize>,
+}
+
+/// One line of the updates tab's tool list.
+struct ToolRow {
+    key: &'static str,
+    version: String,
+    location: String,
+}
+
+/// Settings categories, listed in the sidebar (torrenter).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Appearance,
+    Downloads,
+    SignIn,
+    Updates,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 4] = [
+        SettingsTab::Appearance,
+        SettingsTab::Downloads,
+        SettingsTab::SignIn,
+        SettingsTab::Updates,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "appearance",
+            SettingsTab::Downloads => "downloads",
+            SettingsTab::SignIn => "YouTube sign-in",
+            SettingsTab::Updates => "updates",
+        }
+    }
 }
 
 impl GuiApp {
@@ -760,17 +862,46 @@ impl GuiApp {
             cookie_error: None,
             cookie_retry: None,
             job_query: String::new(),
+            settings_tab: SettingsTab::default(),
+            tool_rows: None,
+            glass_tint: initial_glass_tint(cfg.glass_tint),
+            glass_applied: false,
+            glass_attempts: 0,
+            viewport_fullscreen: false,
+            applied_style: None,
+            pending_saves: Arc::new(AtomicUsize::new(0)),
         };
         if let Hydrate::Corrupt(error) = app.session.hydrate() {
             app.toast_fail(format!("saved list was unreadable and was reset: {error}"));
         }
-        apply_theme(&cc.egui_ctx, theme(app.theme));
         app.setup_tools(None);
         app
     }
 
     fn palette(&self) -> Theme {
         theme(self.theme)
+    }
+
+    /// The alpha the window glass paints surfaces with: macOS only, 100% in
+    /// fullscreen. `None` elsewhere (opaque).
+    fn paint_tint(&self) -> Option<u8> {
+        if cfg!(target_os = "macos") && self.glass_applied {
+            Some(config::effective_glass_tint(
+                self.glass_tint,
+                self.viewport_fullscreen,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn surface(&self, color: Color32) -> Color32 {
+        surface(color, self.paint_tint())
+    }
+
+    fn open_settings(&mut self) {
+        self.show_settings = true;
+        self.tool_rows = None;
     }
 
     // ------------------------------------------------------------ toasts
@@ -880,7 +1011,7 @@ impl GuiApp {
 
     fn set_auto_update(&mut self, on: bool) {
         self.auto_update = on;
-        let _ = config::edit_config(move |cfg| cfg.auto_update = on);
+        self.save_config(move |cfg| cfg.auto_update = on);
         if on && matches!(self.tools_state, ToolsState::Ready) {
             self.toast("checking for updates…");
             self.check_updates();
@@ -942,7 +1073,7 @@ impl GuiApp {
 
     fn apply_cookies(&mut self, source: Option<CookieSource>) {
         let saved = source.clone();
-        let _ = config::edit_config(move |cfg| cfg.cookies = saved);
+        self.save_config(move |cfg| cfg.cookies = saved);
         if let Some(mut tools) = self.session.tools() {
             tools.cookies = source;
             self.session.set_tools(tools);
@@ -1034,6 +1165,7 @@ impl GuiApp {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 WorkerEvent::ToolsDone(result) => {
+                    self.tool_rows = None;
                     self.toasts.retain(|toast| toast.progress.is_none());
                     match result {
                         Ok(paths) => self.tools_ready(paths, true),
@@ -1146,32 +1278,28 @@ impl GuiApp {
         });
     }
 
-    fn save_settings(&self) {
-        let dir = self.download_dir.clone();
-        let max = self.max_downloads;
-        let theme = self.theme.as_str().to_string();
-        let _ = config::edit_config(move |cfg| {
-            cfg.download_dir = Some(dir);
-            cfg.max_downloads = Some(max);
-            cfg.theme = Some(theme);
-        });
-    }
-
     // ---------------------------------------------------------------- UI
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette();
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(crate::update::REPO)
-                    .size(20.0)
-                    .strong()
-                    .color(palette.fg),
+            // The title goes back to the main page; the cog only opens
+            // settings (torrenter: the header never changes).
+            let title = glass_pair(
+                ui,
+                crate::update::REPO,
+                20.0,
+                palette.fg,
+                format!("v{}", crate::VERSION),
+                13.0,
+                palette.dim,
             );
-            ui.label(RichText::new(format!("v{}", crate::VERSION)).color(palette.dim));
+            if click_cursor(title).on_hover_text("downloads").clicked() {
+                self.show_settings = false;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if settings_cog(ui, palette, self.show_settings).clicked() {
-                    self.show_settings = !self.show_settings;
+                    self.open_settings();
                 }
                 ui.add_space(4.0);
                 if labeled_switch(ui, "auto-update", self.auto_update, palette)
@@ -1188,25 +1316,13 @@ impl GuiApp {
                         tick(ui, palette.dim).on_hover_text("tools ready");
                     }
                     ToolsState::Checking => {
-                        ui.label(
-                            RichText::new("checking tools…")
-                                .color(palette.dim)
-                                .size(12.0),
-                        );
+                        glass_label(ui, "checking tools…", 12.0, palette.dim);
                     }
                     ToolsState::Installing => {
-                        ui.label(
-                            RichText::new("setting up tools…")
-                                .color(palette.dim)
-                                .size(12.0),
-                        );
+                        glass_label(ui, "setting up tools…", 12.0, palette.dim);
                     }
                     ToolsState::Failed(_) => {
-                        ui.label(
-                            RichText::new("tools missing")
-                                .color(palette.fail)
-                                .size(12.0),
-                        );
+                        glass_label(ui, "tools missing", 12.0, palette.fail);
                     }
                 }
             });
@@ -1220,7 +1336,7 @@ impl GuiApp {
         };
         let error = error.clone();
         egui::Frame::NONE
-            .fill(palette.row)
+            .fill(card_fill(palette.row))
             .stroke(Stroke::new(1.0_f32, palette.fail))
             .corner_radius(8)
             .inner_margin(10)
@@ -1342,8 +1458,20 @@ impl GuiApp {
 
     fn set_download_dir(&mut self, dir: PathBuf) {
         self.download_dir = dir.clone();
-        // The write happens on the worker: the GUI thread does no file I/O.
-        let _ = self.tx.send(WorkerCmd::SaveDownloadDir(dir));
+        self.save_config(move |cfg| cfg.download_dir = Some(dir));
+    }
+
+    /// Write a change to `config.json` on the worker: the GUI thread does no
+    /// file I/O. A failure comes back as a toast.
+    fn save_config(&self, change: impl FnOnce(&mut config::AppConfig) + Send + 'static) {
+        self.pending_saves.fetch_add(1, Ordering::SeqCst);
+        let sent = self.tx.send(WorkerCmd::EditConfig {
+            change: Box::new(change),
+            pending: Arc::clone(&self.pending_saves),
+        });
+        if sent.is_err() {
+            self.pending_saves.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     fn fetch_area(&mut self, ui: &mut egui::Ui) {
@@ -1430,7 +1558,7 @@ impl GuiApp {
         let jobs = self.session.jobs();
         let any_finished = jobs.iter().any(|job| job.snapshot.is_finished());
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("queue ({})", jobs.len())).color(palette.dim));
+            glass_label(ui, format!("queue ({})", jobs.len()), 14.0, palette.dim);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if any_finished && ui.small_button("clear finished").clicked() {
                     self.session.clear_finished();
@@ -1439,7 +1567,7 @@ impl GuiApp {
         });
         if jobs.is_empty() {
             self.job_query.clear();
-            ui.label(RichText::new("nothing yet: paste a link above").color(palette.dim));
+            glass_label(ui, "nothing yet: paste a link above", 14.0, palette.dim);
             return;
         }
         search_row(
@@ -1456,7 +1584,7 @@ impl GuiApp {
             .filter(|job| job_matches(job, &self.job_query))
             .collect();
         if visible.is_empty() {
-            ui.label(RichText::new("no jobs match that search").color(palette.dim));
+            glass_label(ui, "no jobs match that search", 14.0, palette.dim);
             return;
         }
         let mut actions = Vec::new();
@@ -1493,119 +1621,197 @@ impl GuiApp {
         }
     }
 
-    fn settings_ui(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
+    // ------------------------------------------------------ settings page
+
+    /// Settings as a page (torrenter): "← settings", a sidebar of tabs and
+    /// one card per setting.
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        let palette = self.palette();
+        if page_bar(ui, palette, "settings") {
+            self.show_settings = false;
             return;
         }
-        let palette = self.palette();
-        let mut open = true;
-        let mut changed = false;
-        let mut update_tools = false;
-        let mut cookie_choice: Option<Option<CookieSource>> = None;
-        egui::Window::new("settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, [-12.0, 48.0])
-            .show(ctx, |ui| {
-                ui.set_width(420.0);
-                ui.label(RichText::new("download folder").color(palette.dim));
-                ui.horizontal(|ui| {
-                    ui.label(self.download_dir.display().to_string());
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("change…").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new()
-                            .set_directory(&self.download_dir)
-                            .pick_folder()
-                        {
-                            self.download_dir = dir;
-                            changed = true;
+        let height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(SIDEBAR_W, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(SIDEBAR_W);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add_space(4.0);
+                    for tab in SettingsTab::ALL {
+                        if menu_row(ui, tab.label(), self.settings_tab == tab, palette).clicked() {
+                            self.settings_tab = tab;
                         }
                     }
-                    if ui.button("open").clicked() {
-                        let _ = std::fs::create_dir_all(&self.download_dir);
-                        let _ = open::that(&self.download_dir);
-                    }
-                });
-                ui.separator();
-                ui.label(RichText::new("downloads at once").color(palette.dim));
-                let mut max = self.max_downloads;
-                if ui
-                    .add(egui::Slider::new(&mut max, 1..=MAX_DOWNLOADS_CAP))
-                    .changed()
-                {
-                    self.max_downloads = max;
-                    self.session.set_max_downloads(max);
-                    changed = true;
-                }
-                ui.separator();
-                ui.label(RichText::new("theme").color(palette.dim));
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
-                    ui.add_space(2.0);
-                    for id in ThemeId::ALL {
-                        let swatch = theme_swatch(ui, theme(id).fg, self.theme == id, id.as_str());
-                        if swatch.clicked() && self.theme != id {
-                            self.theme = id;
-                            apply_theme(ctx, theme(id));
-                            changed = true;
+                },
+            );
+            let (line, _) = ui.allocate_exact_size(egui::vec2(1.0, height), Sense::hover());
+            let edge = Color32::from_rgba_unmultiplied(
+                palette.dim.r(),
+                palette.dim.g(),
+                palette.dim.b(),
+                90,
+            );
+            ui.painter().line_segment(
+                [line.center_top(), line.center_bottom()],
+                Stroke::new(1.0_f32, edge),
+            );
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = CARD_GAP;
+                        match self.settings_tab {
+                            SettingsTab::Appearance => self.appearance_tab(ui, palette),
+                            SettingsTab::Downloads => self.downloads_tab(ui, palette),
+                            SettingsTab::SignIn => self.sign_in_tab(ui, palette),
+                            SettingsTab::Updates => self.updates_tab(ui, palette),
                         }
-                    }
-                });
-                ui.separator();
-                ui.label(RichText::new("YouTube sign-in").color(palette.dim));
-                let current = self
-                    .session
-                    .tools()
-                    .and_then(|t| t.cookies)
-                    .map(|c| c.label())
-                    .unwrap_or_else(|| "not used".into());
-                ui.label(current).on_hover_text(
-                    "Only needed when YouTube asks to confirm you're not a bot. ytd reads the browser's YouTube cookies from disk and sends them only to YouTube.",
-                );
-                if let Some(choice) = self.sign_in_choices(ui, true) {
-                    cookie_choice = Some(choice);
-                }
-                ui.separator();
-                ui.label(RichText::new("tools").color(palette.dim));
-                let cfg = config::load_config();
-                for tool in Tool::ALL {
-                    let location = tools::locate(tool)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "missing".into());
-                    let version = cfg
-                        .tools
-                        .get(tool.key())
-                        .map(|r| r.version.clone())
-                        .unwrap_or_else(|| "system".into());
-                    ui.label(format!("{:<7} {version}", tool.key()));
-                    ui.label(RichText::new(location).size(11.0).color(palette.dim));
-                }
-                ui.horizontal(|ui| {
-                    let busy = self.session.any_running()
-                        || matches!(self.tools_state, ToolsState::Installing);
-                    let response = ui.add_enabled(!busy, egui::Button::new("update tools"));
-                    if response.clicked() {
-                        update_tools = true;
-                    }
-                    if busy {
-                        response.on_disabled_hover_text("wait for downloads to finish");
-                    }
-                    if ui.button("open tools folder").clicked() {
-                        let dir = config::tools_dir();
-                        let _ = std::fs::create_dir_all(&dir);
-                        let _ = open::that(&dir);
-                    }
-                });
+                    });
             });
-        if !open {
-            self.show_settings = false;
+        });
+    }
+
+    fn appearance_tab(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        let fill = card_fill(palette.row);
+        page_title(ui, "appearance", palette);
+        let mut picked = None;
+        // Swatches centred in the same box as the tint slider below.
+        setting_card(
+            ui,
+            fill,
+            palette,
+            ("theme", "colour theme for every screen"),
+            APPEARANCE_CONTROL_W,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let (swatch, gap) = (16.0, 10.0);
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.add_space((APPEARANCE_CONTROL_W - (5.0 * swatch + 4.0 * gap)) / 2.0);
+                ui.style_mut().interaction.interact_radius = 0.0;
+                for id in ThemeId::ALL {
+                    if theme_swatch(ui, theme(id).fg, self.theme == id, id.as_str()).clicked()
+                        && self.theme != id
+                    {
+                        picked = Some(id);
+                    }
+                }
+            },
+        );
+        if let Some(id) = picked {
+            self.theme = id;
+            let name = id.as_str().to_string();
+            self.save_config(move |cfg| cfg.theme = Some(name));
         }
-        if changed {
-            self.save_settings();
+        #[cfg(target_os = "macos")]
+        {
+            let locked = self.viewport_fullscreen;
+            let shown = config::effective_glass_tint(self.glass_tint, locked);
+            let description = if locked {
+                "locked at 100% in fullscreen"
+            } else {
+                "how strongly the theme colour sits on the window blur"
+            };
+            let mut persist = false;
+            setting_card(
+                ui,
+                fill,
+                palette,
+                ("window tint", description),
+                APPEARANCE_CONTROL_W,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    glass_label(
+                        ui,
+                        format!("{}%", config::glass_tint_percent(shown)),
+                        12.0,
+                        palette.fg,
+                    );
+                    ui.allocate_ui(egui::vec2(ui.available_width(), 22.0), |ui| {
+                        if locked {
+                            let mut locked_tint = shown;
+                            tint_slider(ui, &mut locked_tint, palette, true);
+                        } else {
+                            let response = tint_slider(ui, &mut self.glass_tint, palette, false);
+                            // Save once the drag ends, not on every frame of it.
+                            if response.drag_stopped()
+                                || (response.changed() && !response.dragged())
+                            {
+                                persist = true;
+                            }
+                        }
+                    });
+                },
+            );
+            if persist {
+                let tint = self.glass_tint;
+                self.save_config(move |cfg| cfg.glass_tint = config::normalize_glass_tint(tint));
+            }
         }
-        match cookie_choice {
+    }
+
+    fn downloads_tab(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        page_title(ui, "downloads", palette);
+        let mut picked = None;
+        setting_card(
+            ui,
+            card_fill(palette.row),
+            palette,
+            (
+                "downloads at once",
+                "how many downloads run together; the rest wait in list order. Paused downloads do not count",
+            ),
+            240.0,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // right-to-left: listed in reverse so they read 1 → max
+                for max in (1..=MAX_DOWNLOADS_CAP).rev() {
+                    let on = self.max_downloads == max;
+                    if route_chip(ui, &max.to_string(), on, palette).clicked() && !on {
+                        picked = Some(max);
+                    }
+                }
+            },
+        );
+        if let Some(max) = picked {
+            self.max_downloads = max;
+            self.session.set_max_downloads(max);
+            self.save_config(move |cfg| cfg.max_downloads = Some(max));
+        }
+    }
+
+    fn sign_in_tab(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        page_title(ui, "YouTube sign-in", palette);
+        let current = self
+            .session
+            .tools()
+            .and_then(|t| t.cookies)
+            .map(|c| c.label())
+            .unwrap_or_else(|| "not used".into());
+        let mut choice = None;
+        settings_card(ui, card_fill(palette.row), palette, |ui| {
+            setting_row(
+                ui,
+                palette,
+                (
+                    "in use",
+                    "only needed when YouTube asks to confirm you're not a bot. ytd reads the browser's YouTube cookies from disk and sends them only to YouTube",
+                ),
+                200.0,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.label(RichText::new(&current).size(13.0).color(palette.fg));
+                },
+            );
+            tile_divider(ui, palette);
+            choice = self.sign_in_choices(ui, true);
+        });
+        match choice {
             Some(Some(source)) => {
                 self.start_cookie_test(source, ytdlp::COOKIE_TEST_URL.to_string(), false)
             }
@@ -1615,6 +1821,82 @@ impl GuiApp {
             }
             None => {}
         }
+    }
+
+    fn updates_tab(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        let fill = card_fill(palette.row);
+        page_title(ui, "updates", palette);
+        let mut toggle = false;
+        setting_card(
+            ui,
+            fill,
+            palette,
+            (
+                "auto-update",
+                "update ytd and its tools (yt-dlp, ffmpeg, deno) from GitHub Releases (same switch as the header)",
+            ),
+            SWITCH_CONTROL_W,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                toggle = labeled_switch(ui, "", self.auto_update, palette).clicked();
+            },
+        );
+        if toggle {
+            self.set_auto_update(!self.auto_update);
+        }
+        if self.tool_rows.is_none() {
+            let cfg = config::load_config();
+            self.tool_rows = Some(
+                Tool::ALL
+                    .into_iter()
+                    .map(|tool| ToolRow {
+                        key: tool.key(),
+                        version: cfg
+                            .tools
+                            .get(tool.key())
+                            .map(|r| r.version.clone())
+                            .unwrap_or_else(|| "system".into()),
+                        location: tools::locate(tool)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "missing".into()),
+                    })
+                    .collect(),
+            );
+        }
+        let busy = self.session.any_running() || matches!(self.tools_state, ToolsState::Installing);
+        let mut update_tools = false;
+        settings_card(ui, fill, palette, |ui| {
+            for (index, row) in self.tool_rows.iter().flatten().enumerate() {
+                if index > 0 {
+                    tile_divider(ui, palette);
+                }
+                setting_row(
+                    ui,
+                    palette,
+                    (row.key, &row.location),
+                    200.0,
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.label(RichText::new(&row.version).size(12.0).color(palette.fg));
+                    },
+                );
+            }
+            tile_divider(ui, palette);
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(!busy, egui::Button::new("update tools"));
+                if response.clicked() {
+                    update_tools = true;
+                }
+                if busy {
+                    response.on_disabled_hover_text("wait for downloads to finish");
+                }
+                if ui.button("open tools folder").clicked() {
+                    let dir = config::tools_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = open::that(&dir);
+                }
+            });
+        });
         if update_tools {
             self.setup_tools(Some(tools::managed()));
         }
@@ -1697,7 +1979,7 @@ impl GuiApp {
 
 fn card<R>(ui: &mut egui::Ui, palette: Theme, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::NONE
-        .fill(palette.row)
+        .fill(card_fill(palette.row))
         .stroke(Stroke::new(1.0_f32, palette.dim))
         .corner_radius(8)
         .inner_margin(12)
@@ -1787,6 +2069,7 @@ fn draft_ui(
                     ui.label(RichText::new(label).color(palette.dim));
                     format_combo(
                         ui,
+                        palette,
                         "video-combo",
                         &draft.info.video_choices(draft.kind),
                         &mut draft.video,
@@ -1797,6 +2080,7 @@ fn draft_ui(
                     ui.label(RichText::new("audio").color(palette.dim));
                     format_combo(
                         ui,
+                        palette,
                         "audio-combo",
                         &draft.info.audio_choices(draft.kind),
                         &mut draft.audio,
@@ -1856,6 +2140,7 @@ fn draft_ui(
 
 fn format_combo(
     ui: &mut egui::Ui,
+    palette: Theme,
     id: &str,
     choices: &[&ytdlp::Format],
     selected: &mut Option<String>,
@@ -1869,17 +2154,415 @@ fn format_combo(
         .and_then(|id| choices.iter().find(|f| f.format_id == id))
         .map(|f| f.label())
         .unwrap_or_else(|| "choose…".into());
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(current)
-        .width(ui.available_width().min(420.0))
-        .show_ui(ui, |ui| {
-            for format in choices {
-                let chosen = selected.as_deref() == Some(format.format_id.as_str());
-                if ui.selectable_label(chosen, format.label()).clicked() {
-                    *selected = Some(format.format_id.clone());
+    // The list opens over the window glass: give it a solid fill so the
+    // rows behind it do not show through (torrenter's solid_popup_below).
+    ui.scope(|ui| {
+        let solid = Color32::from_rgb(palette.row.r(), palette.row.g(), palette.row.b());
+        ui.visuals_mut().window_fill = solid;
+        ui.visuals_mut().panel_fill = solid;
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(current)
+            .width(ui.available_width().min(420.0))
+            .show_ui(ui, |ui| {
+                for format in choices {
+                    let chosen = selected.as_deref() == Some(format.format_id.as_str());
+                    if ui.selectable_label(chosen, format.label()).clicked() {
+                        *selected = Some(format.format_id.clone());
+                    }
                 }
-            }
+            });
+    });
+}
+
+// ---------------------------------------------- text on glass (torrenter)
+
+fn glass_text_wash() -> Color32 {
+    Color32::from_rgba_unmultiplied(16, 14, 16, 110)
+}
+
+/// A dark highlighter smear behind text drawn straight on the window glass,
+/// so it stays readable over a light wallpaper. macOS only.
+fn paint_brush_stroke(painter: &egui::Painter, rect: egui::Rect) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    if rect.width() < 0.5 || rect.height() < 0.5 {
+        return;
+    }
+    let smear = rect.expand2(egui::vec2(5.0, 2.5));
+    let radius = (smear.height() * 0.5).max(4.0);
+    painter.rect_filled(smear, radius, glass_text_wash());
+}
+
+fn paint_washed_galley(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    galley: Arc<egui::Galley>,
+    color: Color32,
+) {
+    paint_brush_stroke(
+        painter,
+        egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(4.0, 2.0)),
+    );
+    painter.galley(pos, galley, color);
+}
+
+/// One line, cut with "…" to the room left.
+fn glass_text(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    size: f32,
+    color: Color32,
+    sense: Sense,
+) -> egui::Response {
+    layout_glass_text(ui, text, size, color, sense, false)
+}
+
+/// Wrapping text with the glass wash.
+fn glass_label(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    size: f32,
+    color: Color32,
+) -> egui::Response {
+    layout_glass_text(ui, text, size, color, Sense::hover(), true)
+}
+
+fn layout_glass_text(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    size: f32,
+    color: Color32,
+    sense: Sense,
+    wrap: bool,
+) -> egui::Response {
+    let pad = if cfg!(target_os = "macos") {
+        egui::vec2(6.0, 4.0)
+    } else {
+        egui::vec2(0.0, 0.0)
+    };
+    let width = (ui.available_width() - pad.x).max(1.0);
+    let format = egui::TextFormat::simple(FontId::new(size, FontFamily::Monospace), color);
+    let mut job = egui::text::LayoutJob::single_section(text.into(), format);
+    job.wrap = if wrap {
+        egui::text::TextWrapping::wrap_at_width(width)
+    } else {
+        egui::text::TextWrapping::truncate_at_width(width)
+    };
+    let galley = ui.painter().layout_job(job);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + pad, sense);
+    let pos = egui::pos2(
+        rect.left() + pad.x * 0.5,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    paint_washed_galley(ui.painter(), pos, galley, color);
+    response
+}
+
+/// The header's title and version under one wash; clickable.
+fn glass_pair(
+    ui: &mut egui::Ui,
+    left: impl Into<String>,
+    left_size: f32,
+    left_color: Color32,
+    right: impl Into<String>,
+    right_size: f32,
+    right_color: Color32,
+) -> egui::Response {
+    let painter = ui.painter();
+    let left_galley = painter.layout_no_wrap(
+        left.into(),
+        FontId::new(left_size, FontFamily::Monospace),
+        left_color,
+    );
+    let right_galley = painter.layout_no_wrap(
+        right.into(),
+        FontId::new(right_size, FontFamily::Monospace),
+        right_color,
+    );
+    let gap = 7.0_f32;
+    let pad = if cfg!(target_os = "macos") {
+        egui::vec2(8.0, 4.0)
+    } else {
+        egui::vec2(0.0, 0.0)
+    };
+    let inner_h = left_galley.size().y.max(right_galley.size().y);
+    let inner_w = left_galley.size().x + gap + right_galley.size().x;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(inner_w, inner_h) + pad, Sense::click());
+    let bottom = rect.bottom() - pad.y * 0.5;
+    let left_pos = egui::pos2(rect.left() + pad.x * 0.5, bottom - left_galley.size().y);
+    let title_mid = left_pos.y + left_galley.size().y * 0.5;
+    let right_pos = egui::pos2(
+        left_pos.x + left_galley.size().x + gap,
+        title_mid - right_galley.size().y * 0.5,
+    );
+    let smear = egui::Rect::from_min_max(
+        egui::pos2(left_pos.x, bottom - inner_h),
+        egui::pos2(right_pos.x + right_galley.size().x, bottom),
+    );
+    paint_brush_stroke(ui.painter(), smear);
+    ui.painter().galley(left_pos, left_galley, left_color);
+    ui.painter().galley(right_pos, right_galley, right_color);
+    response
+}
+
+// --------------------------------------------- settings layout (torrenter)
+
+/// Sidebar width, the gap between cards, and the control boxes on the right
+/// of a setting tile (theme and tint share one so they line up).
+const SIDEBAR_W: f32 = 190.0;
+const CARD_GAP: f32 = 10.0;
+const APPEARANCE_CONTROL_W: f32 = 260.0;
+const SWITCH_CONTROL_W: f32 = 40.0;
+const MENU_INSET: f32 = 20.0;
+
+/// "← name" then a hairline: the first line of an inner page. True when the
+/// arrow or the name is clicked (back to the downloads).
+fn page_bar(ui: &mut egui::Ui, palette: Theme, name: &str) -> bool {
+    let mut back = false;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 28.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let (rect, arrow) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
+            let arrow = click_cursor(arrow);
+            let lit = arrow.hovered();
+            let painter = ui.painter();
+            paint_brush_stroke(painter, rect.shrink(1.5));
+            let stroke = Stroke::new(1.3_f32, if lit { palette.fg } else { palette.dim });
+            let c = rect.center();
+            painter.line_segment(
+                [c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, -4.5)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, 4.5)],
+                stroke,
+            );
+            back |= arrow.on_hover_text("back").clicked();
+            ui.add_space(6.0);
+            back |= click_text(ui, name, 13.0, palette.dim)
+                .on_hover_text("back")
+                .clicked();
+        },
+    );
+    ui.add_space(8.0);
+    hairline(ui, palette);
+    ui.add_space(10.0);
+    back
+}
+
+fn hairline(ui: &mut egui::Ui, palette: Theme) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0_f32, mix_rgb(palette.row_alt, palette.dim, 0.35)),
+    );
+}
+
+/// The content pane's heading (the chosen tab).
+fn page_title(ui: &mut egui::Ui, text: &str, palette: Theme) {
+    ui.add_space(2.0);
+    glass_label(ui, text, 15.0, palette.fg);
+}
+
+/// One setting as a full-width tile: title and description on the left,
+/// the control in a box of `control_w` on the right.
+fn setting_card(
+    ui: &mut egui::Ui,
+    fill: Color32,
+    palette: Theme,
+    text: (&str, &str),
+    control_w: f32,
+    layout: egui::Layout,
+    control: impl FnOnce(&mut egui::Ui),
+) {
+    settings_card(ui, fill, palette, |ui| {
+        setting_row(ui, palette, text, control_w, layout, control);
+    });
+}
+
+/// A tile's content without the frame (rows inside one card share it).
+fn setting_row(
+    ui: &mut egui::Ui,
+    palette: Theme,
+    text: (&str, &str),
+    control_w: f32,
+    layout: egui::Layout,
+    control: impl FnOnce(&mut egui::Ui),
+) {
+    let (title, description) = text;
+    let width = ui.available_width();
+    let text_w = (width - control_w - 24.0).max(80.0);
+    let painter = ui.painter();
+    let title = painter.layout_no_wrap(
+        title.to_string(),
+        FontId::new(13.0, FontFamily::Monospace),
+        palette.fg,
+    );
+    let description = painter.layout(
+        description.to_string(),
+        FontId::new(11.0, FontFamily::Monospace),
+        palette.dim,
+        text_w,
+    );
+    let gap = 3.0;
+    let text_h = title.size().y + gap + description.size().y;
+    let row_h = text_h.max(30.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_h), Sense::hover());
+    let top = rect.center().y - text_h / 2.0;
+    let title_h = title.size().y;
+    let painter = ui.painter();
+    painter.galley(egui::pos2(rect.left(), top), title, palette.fg);
+    painter.galley(
+        egui::pos2(rect.left(), top + title_h + gap),
+        description,
+        palette.dim,
+    );
+    let control_rect =
+        egui::Rect::from_min_max(egui::pos2(rect.right() - control_w, rect.top()), rect.max);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(layout));
+    control(&mut child);
+}
+
+/// A thin line between rows inside one card.
+fn tile_divider(ui: &mut egui::Ui, palette: Theme) {
+    let color =
+        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 50);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        Stroke::new(1.0_f32, color),
+    );
+}
+
+/// A settings card: the same frame as a download row.
+fn settings_card(
+    ui: &mut egui::Ui,
+    fill: Color32,
+    palette: Theme,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::NONE
+        .fill(fill)
+        .corner_radius(8)
+        .stroke(Stroke::new(1.0_f32, palette.dim))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            add_contents(ui);
         });
+}
+
+/// A sidebar row: lit and dotted when selected.
+fn menu_row(ui: &mut egui::Ui, title: &str, selected: bool, palette: Theme) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 26.0), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 3.0, palette.row_alt);
+    }
+    let color = if selected || response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    if selected {
+        painter.circle_filled(
+            egui::pos2(rect.left() + 9.0, rect.center().y),
+            3.0,
+            palette.fg,
+        );
+    }
+    let title = painter.layout_no_wrap(
+        title.to_string(),
+        FontId::new(13.0, FontFamily::Monospace),
+        color,
+    );
+    let pos = egui::pos2(
+        rect.left() + MENU_INSET,
+        rect.center().y - title.size().y / 2.0,
+    );
+    painter.galley(pos, title, color);
+    click_cursor(response)
+}
+
+/// A small choice chip, outlined when selected.
+fn route_chip(ui: &mut egui::Ui, text: &str, selected: bool, palette: Theme) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        text.into(),
+        FontId::new(12.0, FontFamily::Monospace),
+        if selected { palette.fg } else { palette.dim },
+    );
+    let size = galley.size() + egui::vec2(14.0, 8.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let color = if selected || response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    let painter = ui.painter();
+    painter.galley(rect.min + egui::vec2(7.0, 4.0), galley, color);
+    if selected {
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0_f32, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    click_cursor(response)
+}
+
+#[cfg(target_os = "macos")]
+fn tint_slider(ui: &mut egui::Ui, value: &mut u8, palette: Theme, locked: bool) -> egui::Response {
+    let min = config::GLASS_TINT_MIN;
+    let max = config::GLASS_TINT_MAX;
+    let knob_r = 5.0_f32;
+    let width = ui.available_width().max(1.0);
+    let sense = if locked {
+        Sense::hover()
+    } else {
+        Sense::click_and_drag()
+    };
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(width, 22.0), sense);
+    let track = rect.shrink2(egui::vec2(knob_r, 0.0));
+    let span = track.width().max(1.0);
+    if !locked && (response.clicked() || response.dragged()) {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let t = ((pointer.x - track.left()) / span).clamp(0.0, 1.0);
+            let next = min + (t * f32::from(max - min)).round() as u8;
+            if next != *value {
+                *value = next;
+                response.mark_changed();
+            }
+        }
+    }
+    let t = f32::from(config::normalize_glass_tint(*value) - min) / f32::from(max - min);
+    let y = track.center().y;
+    let knob = egui::pos2(track.left() + t * span, y);
+    let painter = ui.painter();
+    painter.line_segment(
+        [egui::pos2(track.left(), y), knob],
+        Stroke::new(2.0_f32, palette.fg),
+    );
+    painter.line_segment(
+        [knob, egui::pos2(track.right(), y)],
+        Stroke::new(1.0_f32, palette.dim),
+    );
+    painter.circle_filled(knob, knob_r, if locked { palette.dim } else { palette.fg });
+    if locked {
+        response.on_hover_text("tint is locked at 100% in fullscreen")
+    } else {
+        click_cursor(response).on_hover_text("how heavy the theme wash sits on the blur")
+    }
 }
 
 // ------------------------------------------------- header and search (torrenter)
@@ -1908,14 +2591,7 @@ fn click_text(
     size: f32,
     color: Color32,
 ) -> egui::Response {
-    click_cursor(
-        ui.add(
-            egui::Label::new(RichText::new(text.into()).size(size).color(color))
-                .selectable(false)
-                .truncate()
-                .sense(Sense::click()),
-        ),
-    )
+    click_cursor(glass_text(ui, text, size, color, Sense::click()))
 }
 
 /// Inside the URL box, at its right end: clear it.
@@ -2012,7 +2688,7 @@ fn search_row(ui: &mut egui::Ui, palette: Theme, query: &mut String, id_salt: &s
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.label(RichText::new("search").size(12.0).color(palette.dim));
+            glass_label(ui, "search", 12.0, palette.dim);
             let search_id = ui.make_persistent_id(id_salt);
             let focused = ui.memory(|memory| memory.has_focus(search_id));
             let field_w = ui.available_width().max(160.0);
@@ -2071,7 +2747,7 @@ fn job_row(ui: &mut egui::Ui, job: &Job, palette: Theme, alt: bool) -> Option<Ro
     let failed = finished && status == progress::FAILED;
     let mut action = None;
     egui::Frame::NONE
-        .fill(if alt { palette.row_alt } else { palette.row })
+        .fill(card_fill(if alt { palette.row_alt } else { palette.row }))
         .stroke(Stroke::new(1.0_f32, palette.dim))
         .corner_radius(8)
         .inner_margin(10)
@@ -2175,7 +2851,25 @@ fn job_row(ui: &mut egui::Ui, job: &Job, palette: Theme, alt: bool) -> Option<Ro
 }
 
 impl eframe::App for GuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// The window glass shows through a transparent clear (macOS only).
+    #[cfg(target_os = "macos")]
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        crate::glass::clear_color()
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // The window may not be ready on the first frame: try again for a
+        // while, and paint opaque until the blur is in place.
+        if !self.glass_applied && self.glass_attempts < GLASS_ATTEMPTS {
+            self.glass_attempts += 1;
+            self.glass_applied = crate::glass::apply(frame);
+        }
+        self.viewport_fullscreen = ctx.input(|input| input.viewport().fullscreen == Some(true));
+        let style = (self.theme, self.paint_tint());
+        if self.applied_style != Some(style) {
+            apply_theme(ctx, self.palette(), style.1);
+            self.applied_style = Some(style);
+        }
         self.drain_events(ctx);
         self.session.persist(false);
         // Outdated tools found by auto-update: replace them once idle.
@@ -2187,33 +2881,40 @@ impl eframe::App for GuiApp {
             self.setup_tools(Some(stale));
         }
 
+        let bg = self.surface(self.palette().bg);
         egui::TopBottomPanel::top("top")
             .frame(
                 egui::Frame::NONE
-                    .fill(self.palette().bg)
+                    .fill(bg)
                     .inner_margin(egui::Margin::symmetric(14, 10)),
             )
             .show(ctx, |ui| {
                 self.top_bar(ui);
-                ui.add_space(GUTTER);
-                self.url_row(ui);
-                ui.add_space(GUTTER / 2.0);
-                self.folder_row(ui);
+                // Inner pages keep only the title bar (torrenter).
+                if !self.show_settings {
+                    ui.add_space(GUTTER);
+                    self.url_row(ui);
+                    ui.add_space(GUTTER / 2.0);
+                    self.folder_row(ui);
+                }
             });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
-                    .fill(self.palette().bg)
+                    .fill(bg)
                     .inner_margin(egui::Margin::symmetric(14, 6)),
             )
             .show(ctx, |ui| {
                 ui.add_space(10.0);
+                if self.show_settings {
+                    self.settings_page(ui);
+                    return;
+                }
                 self.tools_banner(ui);
                 self.fetch_area(ui);
                 ui.add_space(8.0);
                 self.queue_ui(ui);
             });
-        self.settings_ui(ctx);
         self.toasts_ui(ctx);
 
         let busy = self.session.any_active()
@@ -2236,6 +2937,11 @@ impl eframe::App for GuiApp {
         // paused next time.
         self.session.shutdown(Duration::from_secs(5));
         self.session.persist(true);
+        // A setting picked just before quitting is still being written.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.pending_saves.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
