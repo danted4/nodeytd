@@ -155,7 +155,13 @@ Top bar:
 
 - A tick means the tools are ready.
 - **auto-update** (off by default) keeps ytd and its tools current from GitHub Releases. App updates take effect the next time you start ytd. On macOS a new version is announced instead of installed.
-- The cog opens settings: download folder, downloads at once, colour theme, tool versions and **update tools**.
+- The cog opens the settings page; the title goes back to the downloads. Settings has four tabs:
+  - **appearance**: colour theme, and on macOS the **window tint** (how strongly the theme colour sits on the frosted window; locked at 100% in fullscreen)
+  - **downloads**: downloads at once
+  - **YouTube sign-in**: see below
+  - **updates**: auto-update, tool versions, **update tools** and **open tools folder**
+
+On macOS the window is frosted glass, as in torrenter. Windows and Linux stay opaque.
 
 ### "Sign in to confirm you're not a bot"
 

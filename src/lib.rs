@@ -19,6 +19,8 @@ pub mod update;
 pub mod ytdlp;
 
 #[cfg(feature = "gui")]
+mod glass;
+#[cfg(feature = "gui")]
 pub mod gui;
 #[cfg(feature = "gui")]
 pub mod icon;

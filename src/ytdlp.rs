@@ -471,15 +471,16 @@ pub async fn download(
     // stderr is read as bytes: a line that is not UTF-8 (a legacy-codepage
     // file name on Windows) must not stop the draining, or yt-dlp blocks on
     // a full pipe and the job hangs.
-    let mut err_reader = BufReader::new(stderr);
+    // Dropped (closing the pipe) at EOF or on a read error.
+    let mut err_reader = Some(BufReader::new(stderr));
     let mut err_buf: Vec<u8> = Vec::new();
-    let (mut out_open, mut err_open) = (true, true);
+    let mut out_open = true;
     let mut stderr = String::new();
     let mut started = false;
     let mut totals = Totals::default();
     let mut file: Option<PathBuf> = None;
     let mut ticker = tokio::time::interval(Duration::from_millis(150));
-    while out_open || err_open {
+    while out_open || err_reader.is_some() {
         let line = tokio::select! {
             line = out_lines.next_line(), if out_open => {
                 match line.context("failed to read yt-dlp output")? {
@@ -492,10 +493,15 @@ pub async fn download(
             }
             // Cancel safe: bytes read before another branch wins stay in
             // err_buf and the next call goes on from there.
-            read = err_reader.read_until(b'\n', &mut err_buf), if err_open => {
+            read = async {
+                match err_reader.as_mut() {
+                    Some(reader) => reader.read_until(b'\n', &mut err_buf).await,
+                    None => Ok(0),
+                }
+            }, if err_reader.is_some() => {
                 match read {
                     Ok(0) | Err(_) => {
-                        err_open = false;
+                        err_reader = None;
                         continue;
                     }
                     Ok(_) => {
