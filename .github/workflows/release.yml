@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify-tag-on-main:
+    name: tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Ensure tagged commit is on origin/main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: verify-tag-on-main
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: GUI system libs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+      - name: Build CLI
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin ytd
+      - name: Build GUI
+        run: cargo build --locked --release --target ${{ matrix.target }} --features gui --bin ytd-gui
+      # Asset names must match `update::asset_name` (the auto-updater).
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          out="target/${{ matrix.target }}/release"
+          cli="ytd-${{ matrix.target }}${{ matrix.ext }}"
+          gui="ytd-gui-${{ matrix.target }}${{ matrix.ext }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            strip "$out/ytd" || true
+            strip "$out/ytd-gui" || true
+          fi
+          cp "$out/ytd${{ matrix.ext }}" "dist/$cli"
+          cp "$out/ytd-gui${{ matrix.ext }}" "dist/$gui"
+      - name: Package macOS .app zip
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          gui="ytd-gui-${{ matrix.target }}"
+          cargo run --locked --release --features macos-app --bin macos-app -- \
+            "dist/$gui" "${GITHUB_REF_NAME}" "dist/$gui.app.zip"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: attach binaries to GitHub Release
+    needs: [verify-tag-on-main, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
