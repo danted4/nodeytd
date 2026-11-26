@@ -39,6 +39,8 @@ const GUTTER: f32 = 12.0;
 /// Room the × glyph takes at the right end of the URL box (beyond the usual
 /// 8 px text margin), so typed text stops short of it.
 const CLEAR_GLYPH_ROOM: f32 = 16.0;
+/// Frames to retry installing the macOS window glass before giving up.
+const GLASS_ATTEMPTS: u32 = 120;
 
 fn viewport() -> egui::ViewportBuilder {
     let viewport = egui::ViewportBuilder::default()
@@ -172,10 +174,12 @@ fn mix_rgb(a: Color32, b: Color32, toward_b: f32) -> Color32 {
 }
 
 /// Startup tint: clamped, and 100% on Windows (no frost there; torrenter).
+/// Only in memory: the tint is not painted off macOS, so config.json is
+/// left alone.
 fn initial_glass_tint(saved: u8) -> u8 {
     let tint = config::normalize_glass_tint(saved);
     if cfg!(windows) {
-        config::snap_windows_glass_tint(tint)
+        config::windows_glass_tint(tint)
     } else {
         tint
     }
@@ -201,7 +205,9 @@ fn apply_theme(ctx: &egui::Context, palette: Theme, tint: Option<u8>) {
     let glass = |color| surface(color, tint);
     visuals.override_text_color = Some(palette.fg);
     visuals.panel_fill = glass(palette.bg);
-    visuals.window_fill = glass(palette.bg);
+    // Tooltips and popups draw with window_fill: keep it solid so they stay
+    // readable over the glass. The panels carry the glass.
+    visuals.window_fill = palette.bg;
     visuals.extreme_bg_color = glass(palette.row);
     visuals.faint_bg_color = glass(palette.row_alt);
     visuals.widgets.inactive.bg_fill = glass(palette.row);
@@ -498,6 +504,20 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
         return;
     };
     while let Ok(command) = commands.recv() {
+        // Config writes run here, one at a time in the order they were sent:
+        // two quick changes to one setting must not land out of order.
+        let command = match command {
+            WorkerCmd::EditConfig { change, pending } => {
+                let result = config::edit_config(change)
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"));
+                pending.fetch_sub(1, Ordering::SeqCst);
+                let _ = events.send(WorkerEvent::ConfigSaved(result));
+                ctx.request_repaint();
+                continue;
+            }
+            other => other,
+        };
         let events = events.clone();
         let ctx = ctx.clone();
         runtime.spawn(async move {
@@ -539,17 +559,8 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                     let result = ytdlp::test_cookies(&tools, &source, &url).await;
                     WorkerEvent::CookiesTested { source, result }
                 }
-                WorkerCmd::EditConfig { change, pending } => {
-                    let result = tokio::task::spawn_blocking(move || {
-                        config::edit_config(change)
-                            .map(|_| ())
-                            .map_err(|e| format!("{e:#}"))
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    pending.fetch_sub(1, Ordering::SeqCst);
-                    WorkerEvent::ConfigSaved(result)
-                }
+                // Handled in order before spawning, above.
+                WorkerCmd::EditConfig { .. } => return,
                 WorkerCmd::InstallApp {
                     update: available,
                     snapshot,
@@ -772,6 +783,7 @@ pub struct GuiApp {
     /// macOS window glass (torrenter): saved tint, and what is painted now.
     glass_tint: u8,
     glass_applied: bool,
+    glass_attempts: u32,
     viewport_fullscreen: bool,
     applied_style: Option<(ThemeId, Option<u8>)>,
     /// `config.json` writes sent to the worker and not done yet: quitting
@@ -854,6 +866,7 @@ impl GuiApp {
             tool_rows: None,
             glass_tint: initial_glass_tint(cfg.glass_tint),
             glass_applied: false,
+            glass_attempts: 0,
             viewport_fullscreen: false,
             applied_style: None,
             pending_saves: Arc::new(AtomicUsize::new(0)),
@@ -872,7 +885,7 @@ impl GuiApp {
     /// The alpha the window glass paints surfaces with: macOS only, 100% in
     /// fullscreen. `None` elsewhere (opaque).
     fn paint_tint(&self) -> Option<u8> {
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") && self.glass_applied {
             Some(config::effective_glass_tint(
                 self.glass_tint,
                 self.viewport_fullscreen,
@@ -998,7 +1011,7 @@ impl GuiApp {
 
     fn set_auto_update(&mut self, on: bool) {
         self.auto_update = on;
-        let _ = config::edit_config(move |cfg| cfg.auto_update = on);
+        self.save_config(move |cfg| cfg.auto_update = on);
         if on && matches!(self.tools_state, ToolsState::Ready) {
             self.toast("checking for updates…");
             self.check_updates();
@@ -1060,7 +1073,7 @@ impl GuiApp {
 
     fn apply_cookies(&mut self, source: Option<CookieSource>) {
         let saved = source.clone();
-        let _ = config::edit_config(move |cfg| cfg.cookies = saved);
+        self.save_config(move |cfg| cfg.cookies = saved);
         if let Some(mut tools) = self.session.tools() {
             tools.cookies = source;
             self.session.set_tools(tools);
@@ -2845,9 +2858,11 @@ impl eframe::App for GuiApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if !self.glass_applied {
-            crate::glass::apply(frame);
-            self.glass_applied = true;
+        // The window may not be ready on the first frame: try again for a
+        // while, and paint opaque until the blur is in place.
+        if !self.glass_applied && self.glass_attempts < GLASS_ATTEMPTS {
+            self.glass_attempts += 1;
+            self.glass_applied = crate::glass::apply(frame);
         }
         self.viewport_fullscreen = ctx.input(|input| input.viewport().fullscreen == Some(true));
         let style = (self.theme, self.paint_tint());

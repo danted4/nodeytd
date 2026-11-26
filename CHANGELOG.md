@@ -7,8 +7,8 @@
 - **Queue search:** filter downloads by title, link, folder, type, date or status.
 - **No more stuck 0%:** a new download shows **starting** with a sliding bar until the transfer begins, instead of an empty bar. A trimmed download, which has no size until it ends, keeps a sliding bar. **merging** and **converting** now show while ffmpeg finishes a file (yt-dlp reports them on stderr, which ytd did not read before).
 - Long titles in the queue are cut short instead of running under the buttons.
-- **macOS window glass:** the window is frosted, as in torrenter, with a **window tint** setting (40–100%, 60% by default, 100% in fullscreen). Windows and Linux stay opaque.
-- **Settings is a page:** the cog opens it with tabs for appearance, downloads, YouTube sign-in and updates; the title or **← settings** goes back. The download folder moved to the main page. Settings are written off the window's thread, and quitting waits for a save still in flight.
+- **macOS window glass:** the window is frosted, as in torrenter, with a **window tint** setting (0–100%, 60% by default, 100% in fullscreen). Windows and Linux stay opaque.
+- **Settings is a page:** the cog opens it with tabs for appearance, downloads, YouTube sign-in and updates; the title or **← settings** goes back. The download folder moved to the main page. Settings are saved in order off the window's thread, and quitting waits for a save still in flight.
 
 ## 4.0.1
 

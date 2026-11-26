@@ -86,7 +86,10 @@ pub struct AppConfig {
     pub tools: BTreeMap<String, ToolRecord>,
     /// How heavily the theme colour sits on the macOS window blur
     /// (`GLASS_TINT_MIN..=GLASS_TINT_MAX`). Windows and Linux are opaque.
-    #[serde(default = "default_glass_tint")]
+    #[serde(
+        default = "default_glass_tint",
+        deserialize_with = "lenient_glass_tint"
+    )]
     pub glass_tint: u8,
     /// Keys a newer version wrote: kept on rewrite.
     #[serde(flatten)]
@@ -135,22 +138,22 @@ pub fn effective_glass_tint(saved: u8, fullscreen: bool) -> u8 {
     }
 }
 
-pub fn set_glass_tint(value: u8) -> Result<AppConfig> {
-    edit_config(|config| config.glass_tint = normalize_glass_tint(value))
-}
-
 /// Windows has no frost. Ignore a leftover slider value and use 100%.
 pub fn windows_glass_tint(_saved: u8) -> u8 {
     glass_tint_from_percent(100)
 }
 
-/// Rewrite `config.json` when a Windows install still has a lower tint.
-pub fn snap_windows_glass_tint(saved: u8) -> u8 {
-    let max = windows_glass_tint(saved);
-    if normalize_glass_tint(saved) != max {
-        let _ = set_glass_tint(max);
-    }
-    max
+/// A hand-edited `glassTint` (300, 60.5, -1, "x") must not make the whole
+/// file unreadable: clamp a number, default anything else.
+fn lenient_glass_tint<'de, D>(deserializer: D) -> std::result::Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .map(|number| normalize_glass_tint(number.clamp(0.0, 255.0).round() as u8))
+        .unwrap_or(GLASS_TINT_DEFAULT))
 }
 
 impl AppConfig {
@@ -241,6 +244,24 @@ mod tests {
         assert_eq!(effective_glass_tint(saved, true), GLASS_TINT_MAX);
         assert_eq!(effective_glass_tint(saved, false), saved);
         assert_eq!(saved, GLASS_TINT_DEFAULT);
+    }
+
+    #[test]
+    fn odd_glass_tint_values_do_not_reset_the_file() {
+        for (raw, want) in [
+            ("300", GLASS_TINT_MAX),
+            ("-1", GLASS_TINT_MIN),
+            ("60.5", 61),
+            ("100", 100),
+            ("\"x\"", GLASS_TINT_DEFAULT),
+            ("null", GLASS_TINT_DEFAULT),
+        ] {
+            let parsed: AppConfig =
+                serde_json::from_str(&format!(r#"{{"glassTint":{raw},"theme":"ice"}}"#))
+                    .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(parsed.glass_tint, want, "{raw}");
+            assert_eq!(parsed.theme.as_deref(), Some("ice"), "other keys survive");
+        }
     }
 
     #[test]
