@@ -47,7 +47,6 @@ Screenshots use Blender Studio's open movies (Creative Commons).
 
 - **Nothing to install on Windows and Linux.** On first run ytd downloads yt-dlp, ffmpeg and deno (the JavaScript runtime yt-dlp uses for YouTube) into its own folder. Each file is checked against its publisher's SHA-256 checksums.
 - **macOS:** ffmpeg is not auto-installed. Run `brew install ffmpeg`. yt-dlp and deno are fetched automatically.
-- **Building from source:** Rust 1.85 or newer.
 
 ## Windows
 
@@ -190,6 +189,8 @@ Ctrl-C cancels a download and removes its partial files.
   - Linux: `~/.config/ytd`
 
 ## Build from source
+
+Needs Rust 1.85 or newer.
 
 ```bash
 cargo run                                  # CLI
