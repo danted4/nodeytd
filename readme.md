@@ -10,7 +10,7 @@ Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.
 
 **rustYTD gui**
 
-![rustYTD gui: a video preview with format choices above a queue with two downloads running and one paused](docs/gui-4.0.0.png)
+![rustYTD gui: a video preview with format choices above a queue with one download running and two finished](docs/gui-4.0.1.png)
 
 <table>
    <tr>
@@ -23,10 +23,20 @@ Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.
    </tr>
    <tr>
    <td>
-      <img src="docs/queue-4.0.0.png" alt="Queue in the green phosphor theme: two finished downloads and one paused" height="220">
+      <img src="docs/queue-4.0.1.png" alt="Queue in the green phosphor theme: one paused download and two finished" height="220">
    </td>
    <td>
-      <img src="docs/settings-4.0.0.png" alt="Settings: download folder, downloads at once, colour themes and YouTube sign-in" height="220">
+      <img src="docs/settings-4.0.1.png" alt="Settings in the violet theme: download folder, downloads at once, colour themes and the YouTube sign-in in use (Firefox)" height="220">
+   </td>
+   </tr>
+   <tr>
+   <th colspan="2">
+      youtube sign-in (when YouTube asks to confirm you're not a bot)
+   </th>
+   </tr>
+   <tr>
+   <td colspan="2">
+      <img src="docs/signin-4.0.1.png" alt="The YouTube sign-in card listing the browsers found on the computer and a cookies.txt import">
    </td>
    </tr>
    <tr>
@@ -36,7 +46,7 @@ Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.
    </tr>
    <tr>
    <td colspan="2">
-      <img src="docs/cli-4.0.0.png" alt="ytd get downloading a 30-second mp3 clip from the command line">
+      <img src="docs/cli-4.0.1.png" alt="ytd get downloading a 30-second mp3 clip from the command line">
    </td>
    </tr>
 </table>
