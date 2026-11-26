@@ -139,6 +139,20 @@ cargo test --all-features
 
 On Linux the GUI needs `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`.
 
+## Responsible use
+
+rustYTD is a general-purpose tool built on yt-dlp. Download only what you have the right to download: your own uploads, videos under a licence that allows it (such as Creative Commons), or content the rights holder lets you save.
+
+- Saving a video for personal offline viewing can still go against a site's terms. YouTube's terms, for example, only allow downloads where YouTube offers a download button or link. Copyright law also differs from country to country, so check what applies where you live.
+- Don't use rustYTD to redistribute, re-upload or sell other people's content, or to get around paywalls. It does not decrypt DRM-protected media.
+- YouTube sign-in sends your own browser's YouTube cookies, so downloads are made as your account and YouTube's terms apply to that account.
+
+rustYTD is not affiliated with YouTube, Google, yt-dlp, FFmpeg or Deno. It is provided as is, without warranty, and its authors are not liable for how it is used; see the [license](LICENSE).
+
+## License
+
+[ISC](LICENSE)
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=danted4/rustYTD&type=Date)](https://star-history.com/#danted4/rustYTD&Date)
