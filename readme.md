@@ -1,8 +1,12 @@
-# rustYTD
+# rustYTD &nbsp;  &nbsp; <a href="#windows"><img src="docs/os-windows.svg" alt="Windows" width="28" height="28" align="absmiddle"></a> <a href="#macos"><img src="docs/os-macos.svg" alt="macOS" width="28" height="28" align="absmiddle"></a> <a href="#linux"><img src="docs/os-linux.svg" alt="Linux" width="28" height="28" align="absmiddle"></a>
 
 Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org). Paste a link, see a preview, pick what you want, and follow the download queue.
 
-Windows, macOS and Linux.
+| Platform | How to get it | Type |
+|---|---|---|
+| <img src="docs/os-windows.svg" alt="Windows" width="22" height="22" align="absmiddle">&nbsp;**[Windows](#windows)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-x86_64-pc-windows-msvc.exe` (GUI), `ytd-x86_64-pc-windows-msvc.exe` (CLI) | Windows 10/11, x64 |
+| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/rustYTD/releases/latest): GUI as `ytd.app` (`ytd-gui-<arch>-apple-darwin.app.zip`) or a plain binary (`ytd-gui-<arch>-apple-darwin`), CLI `ytd-<arch>-apple-darwin`, for Apple silicon (`aarch64`) and Intel (`x86_64`) | Needs `brew install ffmpeg` |
+| <img src="docs/os-linux.svg" alt="Linux" width="22" height="22" align="absmiddle">&nbsp;**[Linux](#linux)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-x86_64-unknown-linux-gnu` (GUI), `ytd-x86_64-unknown-linux-gnu` (CLI) | x64; the GUI needs GTK 3 |
 
 **rustYTD gui**
 
@@ -45,18 +49,74 @@ Screenshots use Blender Studio's open movies (Creative Commons).
 - **macOS:** ffmpeg is not auto-installed. Run `brew install ffmpeg`. yt-dlp and deno are fetched automatically.
 - **Building from source:** Rust 1.85 or newer.
 
-## Download
+## Windows
 
-Get the build for your system from the [latest release](https://github.com/danted4/rustYTD/releases/latest):
+1. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest).
+2. Download the GUI and/or the CLI:
+   - GUI: `ytd-gui-x86_64-pc-windows-msvc.exe`
+   - CLI: `ytd-x86_64-pc-windows-msvc.exe`
+3. Double-click the GUI `.exe`, or run the CLI from PowerShell or Command Prompt.
 
-| System | GUI | CLI |
-|---|---|---|
-| Windows (x64) | `ytd-gui-x86_64-pc-windows-msvc.exe` | `ytd-x86_64-pc-windows-msvc.exe` |
-| macOS (Apple silicon) | `ytd-gui-aarch64-apple-darwin.app.zip` | `ytd-aarch64-apple-darwin` |
-| macOS (Intel) | `ytd-gui-x86_64-apple-darwin.app.zip` | `ytd-x86_64-apple-darwin` |
-| Linux (x64) | `ytd-gui-x86_64-unknown-linux-gnu` | `ytd-x86_64-unknown-linux-gnu` |
+> [!IMPORTANT]
+> Windows SmartScreen often shows **Windows protected your PC**, because the builds are not code-signed. The `.exe` did not fail; SmartScreen stopped it.
+>
+> | ⚠️ | Do this or the app **never starts** |
+> |---:|:---|
+> | 1️⃣ | Click **More info** |
+> | 2️⃣ | Click **Run anyway** |
 
-`SHA256SUMS` in each release lists the checksum of every file. The builds are not code-signed, so Windows SmartScreen and macOS Gatekeeper ask for confirmation the first time.
+If Explorer still blocks the file: right-click it → **Properties** → tick **Unblock** → **OK**, and run it again.
+
+## macOS
+
+1. `brew install ffmpeg` (yt-dlp and deno are fetched automatically; ffmpeg is not).
+2. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest) and download the files for your Mac (Apple silicon `aarch64`, Intel `x86_64`):
+   - GUI: `ytd-gui-<arch>-apple-darwin.app.zip`, or the plain binary `ytd-gui-<arch>-apple-darwin`
+   - CLI: `ytd-<arch>-apple-darwin`
+3. **GUI:** double-click the `.app.zip` to unzip **`ytd.app`** and drag it to **Applications**. The builds are not signed, so clear the quarantine flag GitHub downloads get:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/ytd.app
+   open /Applications/ytd.app
+   ```
+
+   If macOS still blocks it ("Apple cannot check it for malicious software"): right-click **ytd** → **Open** → **Open**, or go to **System Settings → Privacy & Security** → **Open Anyway**.
+
+4. **CLI** (or the plain GUI binary):
+
+   ```bash
+   chmod +x ytd-aarch64-apple-darwin
+   xattr -d com.apple.quarantine ytd-aarch64-apple-darwin
+   ./ytd-aarch64-apple-darwin
+   ```
+
+Inside `ytd.app`, auto-update tells you about a new version instead of installing it: download the new `.app.zip` from the release.
+
+## Linux
+
+1. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest).
+2. Download the GUI and/or the CLI:
+   - GUI: `ytd-gui-x86_64-unknown-linux-gnu`
+   - CLI: `ytd-x86_64-unknown-linux-gnu`
+3. Make them executable:
+
+   ```bash
+   chmod +x ytd-gui-x86_64-unknown-linux-gnu ytd-x86_64-unknown-linux-gnu
+   ```
+
+4. **GUI only:** install GTK 3 and the xcb libraries. On Debian/Ubuntu:
+
+   ```bash
+   sudo apt install libgtk-3-0 libxkbcommon0 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+   ```
+
+   The CLI does not need these.
+
+5. Run `./ytd-gui-x86_64-unknown-linux-gnu` or `./ytd-x86_64-unknown-linux-gnu`.
+
+### Checksums
+
+`SHA256SUMS` in each release lists the checksum of every file. No Rust is needed to run rustYTD; building from source is under [Build from source](#build-from-source).
 
 ## GUI
 
