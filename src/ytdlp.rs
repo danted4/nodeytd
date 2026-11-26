@@ -468,7 +468,11 @@ pub async fn download(
     // Progress and the output path come on stdout; yt-dlp writes the
     // postprocessor lines ([ytd-pp]) and errors to stderr, so read both.
     let mut out_lines = BufReader::new(stdout).lines();
-    let mut err_lines = BufReader::new(stderr).lines();
+    // stderr is read as bytes: a line that is not UTF-8 (a legacy-codepage
+    // file name on Windows) must not stop the draining, or yt-dlp blocks on
+    // a full pipe and the job hangs.
+    let mut err_reader = BufReader::new(stderr);
+    let mut err_buf: Vec<u8> = Vec::new();
     let (mut out_open, mut err_open) = (true, true);
     let mut stderr = String::new();
     let mut started = false;
@@ -486,16 +490,22 @@ pub async fn download(
                     }
                 }
             }
-            line = err_lines.next_line(), if err_open => {
-                match line {
-                    Ok(Some(line)) => {
+            // Cancel safe: bytes read before another branch wins stay in
+            // err_buf and the next call goes on from there.
+            read = err_reader.read_until(b'\n', &mut err_buf), if err_open => {
+                match read {
+                    Ok(0) | Err(_) => {
+                        err_open = false;
+                        continue;
+                    }
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&err_buf)
+                            .trim_end_matches(['\r', '\n'])
+                            .to_string();
+                        err_buf.clear();
                         stderr.push_str(&line);
                         stderr.push('\n');
                         line
-                    }
-                    _ => {
-                        err_open = false;
-                        continue;
                     }
                 }
             }
@@ -503,7 +513,7 @@ pub async fn download(
                 if let Err(error) = progress.check_control() {
                     kill_tree(&mut child).await;
                     drop(out_lines);
-                    drop(err_lines);
+                    drop(err_reader);
                     // A stop can land while a pause is still killing yt-dlp:
                     // look at the flags again, stop wins.
                     let stopped = crate::progress::is_stopped(&error)
@@ -682,6 +692,57 @@ mod tests {
             Line::File(PathBuf::from("C:\\out\\a b.mp4"))
         );
         assert_eq!(parse_line("[youtube] Extracting URL"), Line::Other);
+    }
+
+    /// A fake yt-dlp that floods stderr with more than a pipe buffer of
+    /// bytes that are not UTF-8, reports a merge there, and then the file.
+    /// The download must drain it all and finish (it used to hang).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn non_utf8_stderr_does_not_hang_and_merging_shows() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             echo '[ytd-start] 18'\n\
+             i=0; while [ $i -lt 3000 ]; do printf 'warn \\377\\376 legacy name %04d xxxxxxxxxxxxxxxxxxxx\\n' $i >&2; i=$((i+1)); done\n\
+             echo '[ytd] 100 100 NA 50 0 18'\n\
+             echo '[ytd-pp] started Merger' >&2\n\
+             echo '[ytd-file] /tmp/out.mp4'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = ToolPaths {
+            ytdlp: script,
+            ffmpeg: dir.path().join("ffmpeg"),
+            deno: None,
+            cookies: None,
+        };
+        let request = DownloadRequest {
+            url: "https://example.com/v".into(),
+            title: "clip".into(),
+            kind: DownloadKind::Merged,
+            video_format: None,
+            audio_format: None,
+            name: "clip".into(),
+            dir: dir.path().join("out"),
+            trim_start: None,
+            trim_end: None,
+            expected_size: 0,
+        };
+        let snapshot = std::sync::Arc::new(crate::progress::JobSnapshot::default());
+        let progress = ProgressHandle::Gui(std::sync::Arc::clone(&snapshot));
+        let file = tokio::time::timeout(
+            Duration::from_secs(20),
+            download(&tools, &request, &progress),
+        )
+        .await
+        .expect("download hung")
+        .unwrap();
+        assert_eq!(file, PathBuf::from("/tmp/out.mp4"));
+        assert_eq!(snapshot.status(), MERGING, "stderr postprocess line seen");
     }
 
     #[test]

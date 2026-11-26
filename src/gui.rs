@@ -418,6 +418,8 @@ enum WorkerCmd {
         url: String,
         tools: ToolPaths,
     },
+    /// Write the download folder to `config.json` off the GUI thread.
+    SaveDownloadDir(PathBuf),
 }
 
 enum WorkerEvent {
@@ -431,6 +433,8 @@ enum WorkerEvent {
         source: CookieSource,
         result: Result<(), String>,
     },
+    /// A `config.json` write from the worker finished.
+    ConfigSaved(Result<(), String>),
     Info {
         seq: u64,
         /// The URL this info is for: the text box may have changed since.
@@ -492,6 +496,16 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                 WorkerCmd::TestCookies { source, url, tools } => {
                     let result = ytdlp::test_cookies(&tools, &source, &url).await;
                     WorkerEvent::CookiesTested { source, result }
+                }
+                WorkerCmd::SaveDownloadDir(dir) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        config::edit_config(move |cfg| cfg.download_dir = Some(dir))
+                            .map(|_| ())
+                            .map_err(|e| format!("{e:#}"))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    WorkerEvent::ConfigSaved(result)
                 }
                 WorkerCmd::InstallApp {
                     update: available,
@@ -1095,6 +1109,10 @@ impl GuiApp {
                         Err(reason) => self.cookie_error = Some(reason),
                     }
                 }
+                WorkerEvent::ConfigSaved(Err(error)) => {
+                    self.toast_fail(format!("could not save settings: {error}"))
+                }
+                WorkerEvent::ConfigSaved(Ok(())) => {}
                 WorkerEvent::AppInstalled(Err(error)) => {
                     self.toast_fail(format!("update failed: {error}"))
                 }
@@ -1324,9 +1342,8 @@ impl GuiApp {
 
     fn set_download_dir(&mut self, dir: PathBuf) {
         self.download_dir = dir.clone();
-        if let Err(error) = config::edit_config(move |cfg| cfg.download_dir = Some(dir)) {
-            self.toast_fail(format!("could not save the download folder: {error:#}"));
-        }
+        // The write happens on the worker: the GUI thread does no file I/O.
+        let _ = self.tx.send(WorkerCmd::SaveDownloadDir(dir));
     }
 
     fn fetch_area(&mut self, ui: &mut egui::Ui) {
@@ -1384,6 +1401,8 @@ impl GuiApp {
                 match self.session.queue(request) {
                     Ok(_) => {
                         self.fetch = Fetch::Idle;
+                        // A leftover search must not hide the new job.
+                        self.job_query.clear();
                         // Keep a link typed while this one was loading.
                         if self.url.trim() == queued_url {
                             self.url.clear();
@@ -1419,6 +1438,7 @@ impl GuiApp {
             });
         });
         if jobs.is_empty() {
+            self.job_query.clear();
             ui.label(RichText::new("nothing yet: paste a link above").color(palette.dim));
             return;
         }
@@ -1892,6 +1912,7 @@ fn click_text(
         ui.add(
             egui::Label::new(RichText::new(text.into()).size(size).color(color))
                 .selectable(false)
+                .truncate()
                 .sense(Sense::click()),
         ),
     )
