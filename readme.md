@@ -5,7 +5,7 @@ Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.
 | Platform&nbsp;/&nbsp;system | How to get it | Notes |
 |---|---|---|
 | <img src="docs/os-windows.svg" alt="Windows" width="22" height="22" align="absmiddle">&nbsp;**[Windows](#windows)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-x86_64-pc-windows-msvc.exe` (GUI), `ytd-x86_64-pc-windows-msvc.exe` (CLI) | Windows 10/11, x64 |
-| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-<arch>-apple-darwin.app.zip` (GUI), `ytd-<arch>-apple-darwin` (CLI); `aarch64` or `x86_64` | Apple silicon and Intel; needs Homebrew ffmpeg |
+| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-<arch>-apple-darwin.app.zip` (GUI), `ytd-<arch>-apple-darwin` (CLI); `aarch64` or `x86_64` | Apple silicon and Intel |
 | <img src="docs/os-linux.svg" alt="Linux" width="22" height="22" align="absmiddle">&nbsp;**[Linux](#linux)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-x86_64-unknown-linux-gnu` (GUI), `ytd-x86_64-unknown-linux-gnu` (CLI) | x64; GUI needs GTK&nbsp;3 |
 
 **rustYTD gui**
@@ -55,8 +55,8 @@ Screenshots use Blender Studio's open movies (Creative Commons).
 
 ## Prerequisite
 
-- **Nothing to install on Windows and Linux.** On first run ytd downloads yt-dlp, ffmpeg and deno (the JavaScript runtime yt-dlp uses for YouTube) into its own folder. Each file is checked against its publisher's SHA-256 checksums.
-- **macOS:** ffmpeg is not auto-installed. Run `brew install ffmpeg`. yt-dlp and deno are fetched automatically.
+- **Nothing to install.** On first run ytd downloads yt-dlp, ffmpeg and deno (the JavaScript runtime yt-dlp uses for YouTube) into its own folder. Each file is checked against its publisher's SHA-256 checksums.
+- **macOS:** ffmpeg comes from ytd's own static build ([danted4/ffmpeg-macos](https://github.com/danted4/ffmpeg-macos), GPL). If you already have ffmpeg (for example `brew install ffmpeg`), ytd uses that one instead.
 
 ## Windows
 
@@ -78,11 +78,10 @@ If Explorer still blocks the file: right-click it → **Properties** → tick **
 
 ## macOS
 
-1. `brew install ffmpeg` (yt-dlp and deno are fetched automatically; ffmpeg is not).
-2. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest) and download the files for your Mac (Apple silicon `aarch64`, Intel `x86_64`):
+1. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest) and download the files for your Mac (Apple silicon `aarch64`, Intel `x86_64`):
    - GUI: `ytd-gui-<arch>-apple-darwin.app.zip`, or the plain binary `ytd-gui-<arch>-apple-darwin`
    - CLI: `ytd-<arch>-apple-darwin`
-3. **GUI:** double-click the `.app.zip` to unzip **`ytd.app`** and drag it to **Applications**. The builds are not signed, so clear the quarantine flag GitHub downloads get:
+2. **GUI:** double-click the `.app.zip` to unzip **`ytd.app`** and drag it to **Applications**. The builds are not signed, so clear the quarantine flag GitHub downloads get:
 
    ```bash
    xattr -dr com.apple.quarantine /Applications/ytd.app
@@ -91,7 +90,7 @@ If Explorer still blocks the file: right-click it → **Properties** → tick **
 
    If macOS still blocks it ("Apple cannot check it for malicious software"): right-click **ytd** → **Open** → **Open**, or go to **System Settings → Privacy & Security** → **Open Anyway**.
 
-4. **CLI** (or the plain GUI binary):
+3. **CLI** (or the plain GUI binary):
 
    ```bash
    chmod +x ytd-aarch64-apple-darwin

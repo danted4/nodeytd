@@ -135,9 +135,9 @@ pub fn resolve() -> Result<ToolPaths> {
     }
 }
 
-/// Shown when ffmpeg cannot be installed for this platform.
+/// Added to a failed ffmpeg install on macOS: Homebrew's ffmpeg also works.
 pub const MACOS_FFMPEG_HINT: &str =
-    "ffmpeg is not auto-installed on macOS: run `brew install ffmpeg`, then retry";
+    "could not install ffmpeg (or run `brew install ffmpeg`, then retry)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Archive {
@@ -188,6 +188,20 @@ fn plan_for(tool: Tool, os: &str, arch: &str) -> Option<Plan> {
                 max_bytes: 200 * MB,
             })
         }
+        // macOS: ytd's own static build (danted4/ffmpeg-macos), since
+        // FFmpeg-Builds has no macOS. Releases are tagged
+        // `<ffmpeg version>-<build>` and carry SHA256SUMS.
+        Tool::Ffmpeg if os == "macos" => Some(Plan {
+            repo: "danted4/ffmpeg-macos",
+            asset: format!(
+                "ffmpeg-{}-apple-darwin.zip",
+                if arm { "aarch64" } else { "x86_64" }
+            ),
+            sums: Sums::Combined("SHA256SUMS"),
+            archive: Archive::Zip,
+            members: vec![exe_for(os, "ffmpeg"), exe_for(os, "ffprobe")],
+            max_bytes: 200 * MB,
+        }),
         Tool::Ffmpeg => {
             let (asset, archive) = match (os, arm) {
                 ("windows", false) => ("ffmpeg-master-latest-win64-gpl.zip", Archive::Zip),
@@ -313,9 +327,10 @@ pub async fn outdated() -> Result<Vec<Tool>> {
     Ok(stale)
 }
 
-/// ffmpeg's builds are republished every day under a rolling tag (its
-/// "version" is the publish date): only a build a month newer is worth the
-/// ~200 MB download. Other tools: any newer release.
+/// FFmpeg-Builds (Windows, Linux) republishes every day under a rolling tag
+/// (its "version" is the publish date): only a build a month newer is worth
+/// the ~200 MB download. ytd's macOS ffmpeg has real tags (`9.1-1`), so any
+/// other tag is newer, as for the other tools.
 const FFMPEG_REFRESH_DAYS: i64 = 30;
 
 fn is_stale(tool: Tool, installed: &str, latest: &str) -> bool {
@@ -381,9 +396,6 @@ pub fn http_client() -> Result<reqwest::Client> {
 /// Install (or update) one tool. Returns the release version installed.
 pub async fn install(tool: Tool, progress: &ProgressHandle) -> Result<String> {
     let Some(plan) = plan(tool) else {
-        if tool == Tool::Ffmpeg && cfg!(target_os = "macos") {
-            bail!(MACOS_FFMPEG_HINT);
-        }
         bail!("{} cannot be auto-installed on this platform", tool.key());
     };
     let client = http_client()?;
@@ -395,7 +407,13 @@ pub async fn install(tool: Tool, progress: &ProgressHandle) -> Result<String> {
         progress,
     )
     .await
-    .with_context(|| format!("installing {}", tool.key()))?;
+    .with_context(|| {
+        if tool == Tool::Ffmpeg && cfg!(target_os = "macos") {
+            MACOS_FFMPEG_HINT.to_string()
+        } else {
+            format!("installing {}", tool.key())
+        }
+    })?;
     let installed_at = chrono::Local::now().format("%Y-%m-%d").to_string();
     let recorded = version.clone();
     config::edit_config(move |config| {
@@ -410,8 +428,8 @@ pub async fn install(tool: Tool, progress: &ProgressHandle) -> Result<String> {
     Ok(version)
 }
 
-/// Install every missing tool, in order. Tools we cannot install here (ffmpeg
-/// on macOS) fail with a hint; the others still install.
+/// Install every missing tool, in order. A tool that fails to install does
+/// not stop the others.
 pub async fn install_missing(progress_for: impl Fn(Tool) -> ProgressHandle) -> Result<ToolPaths> {
     let mut errors = Vec::new();
     for tool in missing() {
@@ -806,7 +824,17 @@ mod tests {
             plan_for(Tool::Ffmpeg, "linux", "x86_64").unwrap().archive,
             Archive::TarXz
         );
-        assert!(plan_for(Tool::Ffmpeg, "macos", "aarch64").is_none());
+        for (arch, asset) in [
+            ("aarch64", "ffmpeg-aarch64-apple-darwin.zip"),
+            ("x86_64", "ffmpeg-x86_64-apple-darwin.zip"),
+        ] {
+            let mac = plan_for(Tool::Ffmpeg, "macos", arch).unwrap();
+            assert_eq!(mac.repo, "danted4/ffmpeg-macos");
+            assert_eq!(mac.asset, asset);
+            assert_eq!(mac.archive, Archive::Zip);
+            assert!(matches!(mac.sums, Sums::Combined("SHA256SUMS")));
+            assert_eq!(mac.members, ["ffmpeg", "ffprobe"]);
+        }
         let deno = plan_for(Tool::Deno, "windows", "x86_64").unwrap();
         assert_eq!(deno.asset, "deno-x86_64-pc-windows-msvc.zip");
         assert_eq!(deno.members, vec!["deno.exe".to_string()]);
@@ -958,6 +986,80 @@ mod tests {
         .unwrap_err();
         assert!(format!("{error:#}").contains("checksum mismatch"));
         assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn macos_ffmpeg_tags_update_on_any_change() {
+        assert!(!is_stale(Tool::Ffmpeg, "9.1-1", "9.1-1"));
+        assert!(is_stale(Tool::Ffmpeg, "9.1-1", "9.1-2"), "library bump");
+        assert!(is_stale(Tool::Ffmpeg, "9.1-2", "9.2-1"), "new ffmpeg");
+    }
+
+    /// The macOS plan as published by danted4/ffmpeg-macos: a zip holding
+    /// ffmpeg and ffprobe at its root, and one SHA256SUMS for the release.
+    #[tokio::test]
+    async fn installs_macos_ffmpeg_from_combined_sums() {
+        let mut zip_bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("ffmpeg", options).unwrap();
+            writer.write_all(b"ffmpeg-mac").unwrap();
+            writer.start_file("ffprobe", options).unwrap();
+            writer.write_all(b"ffprobe-mac").unwrap();
+            writer.finish().unwrap();
+        }
+        let plan = plan_for(Tool::Ffmpeg, "macos", "aarch64").unwrap();
+        let repo = plan.repo;
+        let mut routes = HashMap::new();
+        routes.insert(
+            format!("/{repo}/releases/download/9.1-1/{}", plan.asset),
+            zip_bytes.clone(),
+        );
+        routes.insert(
+            format!("/{repo}/releases/download/9.1-1/SHA256SUMS"),
+            format!(
+                "{}  ffmpeg-x86_64-apple-darwin.zip\n{}  {}\n",
+                sha_hex(b"other"),
+                sha_hex(&zip_bytes),
+                plan.asset
+            )
+            .into_bytes(),
+        );
+        let base =
+            serve_with_release(routes, repo, "9.1-1", &[plan.asset.as_str(), "SHA256SUMS"]).await;
+        let github = Github {
+            api: base.clone(),
+            web: base,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let version = install_with(
+            &http_client().unwrap(),
+            &github,
+            &plan,
+            dir.path(),
+            &ProgressHandle::Hidden,
+        )
+        .await
+        .unwrap();
+        assert_eq!(version, "9.1-1");
+        assert_eq!(
+            std::fs::read(dir.path().join("ffmpeg")).unwrap(),
+            b"ffmpeg-mac"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("ffprobe")).unwrap(),
+            b"ffprobe-mac"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("ffmpeg"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o755, 0o755, "executable");
+        }
     }
 
     #[tokio::test]

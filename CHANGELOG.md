@@ -9,6 +9,7 @@
 - Long titles in the queue are cut short instead of running under the buttons.
 - **macOS window glass:** the window is frosted, as in torrenter, with a **window tint** setting (0–100%, 60% by default, 100% in fullscreen). Windows and Linux stay opaque.
 - **Settings is a page:** the cog opens it with tabs for appearance, downloads, YouTube sign-in and updates; the title or **← settings** goes back. The download folder moved to the main page. Settings are saved in order off the window's thread, and quitting waits for a save still in flight.
+- **ffmpeg on macOS without Homebrew:** on a Mac with no ffmpeg, ytd installs its own static build from [danted4/ffmpeg-macos](https://github.com/danted4/ffmpeg-macos) (Apple silicon and Intel, checked against the release's SHA256SUMS). An ffmpeg you already have, such as Homebrew's, is still used first.
 
 ## 4.0.1
 
