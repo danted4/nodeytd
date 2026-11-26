@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 4.0.1
 
-- The repository is now `danted4/rustYTD` (renamed from `nodeytd`). App updates are checked there; v4.0.0 builds still reach it through GitHub's redirect.
+- The GUI header, the window title and the CLI start with the `danted4/rustYTD v4.0.1` signature, as in torrenter.
+- The repository is now `danted4/rustYTD` (renamed from `nodeytd`). Self-update now checks it directly (v4.0.0 reached it through GitHub's redirect).
 
 ## 4.0.0
 
