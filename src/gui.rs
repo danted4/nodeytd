@@ -955,15 +955,7 @@ impl GuiApp {
         if wanted.is_empty() {
             match tools::resolve() {
                 Ok(paths) => self.tools_ready(paths, false),
-                Err(error) => {
-                    let message =
-                        if cfg!(target_os = "macos") && tools::locate(Tool::Ffmpeg).is_none() {
-                            tools::MACOS_FFMPEG_HINT.to_string()
-                        } else {
-                            format!("{error:#}")
-                        };
-                    self.tools_state = ToolsState::Failed(message);
-                }
+                Err(error) => self.tools_state = ToolsState::Failed(format!("{error:#}")),
             }
             return;
         }
