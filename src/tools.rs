@@ -135,9 +135,10 @@ pub fn resolve() -> Result<ToolPaths> {
     }
 }
 
-/// Added to a failed ffmpeg install on macOS: Homebrew's ffmpeg also works.
-pub const MACOS_FFMPEG_HINT: &str =
-    "could not install ffmpeg (or run `brew install ffmpeg`, then retry)";
+/// Put before a failed ffmpeg install's cause on macOS: Homebrew's ffmpeg
+/// also works.
+const MACOS_FFMPEG_HINT: &str =
+    "could not install ffmpeg (you can also run `brew install ffmpeg` and retry)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Archive {
@@ -329,8 +330,8 @@ pub async fn outdated() -> Result<Vec<Tool>> {
 
 /// FFmpeg-Builds (Windows, Linux) republishes every day under a rolling tag
 /// (its "version" is the publish date): only a build a month newer is worth
-/// the ~200 MB download. ytd's macOS ffmpeg has real tags (`9.1-1`), so any
-/// other tag is newer, as for the other tools.
+/// the ~200 MB download. ytd's macOS ffmpeg is tagged `<version>-<build>`
+/// (`9.1-2`): only a higher one counts, so it never downgrades.
 const FFMPEG_REFRESH_DAYS: i64 = 30;
 
 fn is_stale(tool: Tool, installed: &str, latest: &str) -> bool {
@@ -341,10 +342,23 @@ fn is_stale(tool: Tool, installed: &str, latest: &str) -> bool {
         return true;
     }
     let date = |raw: &str| chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
-    match (date(installed), date(latest)) {
-        (Some(installed), Some(latest)) => (latest - installed).num_days() >= FFMPEG_REFRESH_DAYS,
+    if let (Some(installed), Some(latest)) = (date(installed), date(latest)) {
+        return (latest - installed).num_days() >= FFMPEG_REFRESH_DAYS;
+    }
+    match (build_tag(installed), build_tag(latest)) {
+        (Some(installed), Some(latest)) => latest > installed,
         _ => true,
     }
+}
+
+/// `9.1-2` -> ([9, 1], 2): ffmpeg's version numbers, then the build.
+fn build_tag(raw: &str) -> Option<(Vec<u32>, u32)> {
+    let (version, build) = raw.rsplit_once('-')?;
+    let version = version
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect::<Option<Vec<u32>>>()?;
+    Some((version, build.parse().ok()?))
 }
 
 impl Release {
@@ -989,10 +1003,22 @@ mod tests {
     }
 
     #[test]
-    fn macos_ffmpeg_tags_update_on_any_change() {
+    fn macos_ffmpeg_tags_only_move_up() {
         assert!(!is_stale(Tool::Ffmpeg, "9.1-1", "9.1-1"));
         assert!(is_stale(Tool::Ffmpeg, "9.1-1", "9.1-2"), "library bump");
         assert!(is_stale(Tool::Ffmpeg, "9.1-2", "9.2-1"), "new ffmpeg");
+        assert!(
+            is_stale(Tool::Ffmpeg, "9.1-9", "9.10-1"),
+            "numeric, not text"
+        );
+        assert!(
+            !is_stale(Tool::Ffmpeg, "9.1-2", "9.1-1"),
+            "never downgrades"
+        );
+        assert!(
+            !is_stale(Tool::Ffmpeg, "9.2-1", "9.1-5"),
+            "never downgrades"
+        );
     }
 
     /// The macOS plan as published by danted4/ffmpeg-macos: a zip holding

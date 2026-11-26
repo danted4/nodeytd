@@ -56,7 +56,7 @@ Screenshots use Blender Studio's open movies (Creative Commons).
 ## Prerequisite
 
 - **Nothing to install.** On first run ytd downloads yt-dlp, ffmpeg and deno (the JavaScript runtime yt-dlp uses for YouTube) into its own folder. Each file is checked against its publisher's SHA-256 checksums.
-- **macOS:** ffmpeg comes from ytd's own static build ([danted4/ffmpeg-macos](https://github.com/danted4/ffmpeg-macos), GPL). If you already have ffmpeg (for example `brew install ffmpeg`), ytd uses that one instead.
+- **macOS:** ffmpeg comes from ytd's own static build ([danted4/ffmpeg-macos](https://github.com/danted4/ffmpeg-macos), GPL), installed only when no ffmpeg is found. If you already have one (for example from `brew install ffmpeg`), ytd uses it and installs nothing. Once ytd has installed its own, that one is used and kept up to date.
 
 ## Windows
 
