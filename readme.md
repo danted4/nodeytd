@@ -47,7 +47,7 @@ Screenshots use Blender Studio's open movies (Creative Commons).
 
 ## Download
 
-Get the build for your system from the [latest release](https://github.com/danted4/nodeytd/releases/latest):
+Get the build for your system from the [latest release](https://github.com/danted4/rustYTD/releases/latest):
 
 | System | GUI | CLI |
 |---|---|---|
@@ -141,4 +141,4 @@ On Linux the GUI needs `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=danted4/nodeytd&type=Date)](https://star-history.com/#danted4/nodeytd&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=danted4/rustYTD&type=Date)](https://star-history.com/#danted4/rustYTD&Date)

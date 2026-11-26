@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The repository is now `danted4/rustYTD` (renamed from `nodeytd`). App updates are checked there; v4.0.0 builds still reach it through GitHub's redirect.
+
 ## 4.0.0
 
 A full rewrite in Rust that replaces the Node CLI.

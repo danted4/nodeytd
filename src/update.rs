@@ -15,7 +15,7 @@ use crate::progress::{ProgressHandle, VERIFYING};
 use crate::tools::{self, Github};
 
 /// GitHub redirects the API and downloads if the repo is renamed.
-pub const REPO: &str = "danted4/nodeytd";
+pub const REPO: &str = "danted4/rustYTD";
 const MAX_BYTES: u64 = 120 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
