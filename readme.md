@@ -137,12 +137,18 @@ Inside `ytd.app`, auto-update tells you about a new version instead of installin
    - **VIDEO**: video only, no audio
    - **FILE**: a single stream that already has both (often lower quality)
 4. Pick the quality, rename the file if you like, and optionally set trim start/end times.
-5. Click **add to queue**.
+5. Click **add to queue**, or **dismiss** to drop the preview and the link.
+
+The **×** at the end of the link box (or Esc) clears it and starts over, even while a preview is still loading.
+
+The folder under the link box is where downloads go. Click it to choose another one. Downloads already in the queue keep their folder.
 
 Queue:
 
 - Downloads run in parallel up to the limit in settings (default 2).
+- A new download shows **starting** with a sliding bar while yt-dlp reads the video page, then **downloading** with its progress. A trimmed download has no size until it ends, so its bar keeps sliding. **merging** and **converting** show while ffmpeg finishes the file.
 - **pause** keeps the partial file and **resume** continues from it. **stop** cancels and deletes the partial files.
+- **search** filters the list by title, link, folder, type, date or status. Esc clears it.
 - Click a title to open its folder. The list is saved between runs.
 
 Top bar:

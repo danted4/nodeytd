@@ -171,6 +171,11 @@ impl DownloadRequest {
                 "download:[ytd] %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s %(info.format_id)s",
                 "--progress-template",
                 "postprocess:[ytd-pp] %(progress.status)s %(progress.postprocessor)s",
+                // Right before the transfer starts, after extraction and the
+                // YouTube check. A trim (ffmpeg downloader) prints no
+                // progress until it ends, so this is its only start signal.
+                "--print",
+                "before_dl:[ytd-start] %(format_id)s",
                 "--print",
                 "after_move:[ytd-file] %(filepath)s",
                 "-f",
@@ -403,6 +408,10 @@ mod tests {
         let joined = strings(&req.ytdlp_args(&tools())).join(" ");
         assert!(joined.contains("-x --audio-format mp3"));
         assert!(joined.contains("--download-sections *3-10 --force-keyframes-at-cuts"));
+        assert!(
+            joined.contains("--print before_dl:[ytd-start] %(format_id)s"),
+            "trims need the start marker"
+        );
     }
 
     #[test]

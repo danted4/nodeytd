@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::progress::{
@@ -346,6 +346,8 @@ enum Line {
         started: bool,
         name: String,
     },
+    /// `before_dl`: extraction is over and the transfer begins.
+    Start,
     File(PathBuf),
     Other,
 }
@@ -360,6 +362,9 @@ fn parse_line(line: &str) -> Line {
     let line = line.trim_end_matches(['\r', '\n']);
     if let Some(rest) = line.strip_prefix("[ytd-file] ") {
         return Line::File(PathBuf::from(rest.trim()));
+    }
+    if line.starts_with("[ytd-start]") {
+        return Line::Start;
     }
     if let Some(rest) = line.strip_prefix("[ytd-pp] ") {
         let mut tokens = rest.split_whitespace();
@@ -383,6 +388,25 @@ fn parse_line(line: &str) -> Line {
         };
     }
     Line::Other
+}
+
+/// The status a line moves a download to. The job stays `starting` (a
+/// sliding bar) through extraction and the YouTube check, and becomes
+/// `downloading` at the first sign of the transfer: the `before_dl` marker or
+/// a progress line, whichever comes first.
+fn status_for(line: &Line, started: bool) -> Option<&'static str> {
+    match line {
+        Line::Start | Line::Progress { .. } if !started => Some(DOWNLOADING),
+        Line::Postprocess {
+            started: true,
+            name,
+        } => match name.as_str() {
+            "Merger" => Some(MERGING),
+            "ExtractAudio" | "VideoConvertor" | "VideoRemuxer" => Some(CONVERTING),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Byte counts per stream (a merge downloads video, then audio).
@@ -431,14 +455,8 @@ pub async fn download(
         .spawn()
         .with_context(|| format!("failed to run {}", tools.ytdlp.display()))?;
     let stdout = child.stdout.take().context("no stdout")?;
-    let mut stderr = child.stderr.take().context("no stderr")?;
-    let stderr_task = tokio::spawn(async move {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text).await;
-        text
-    });
+    let stderr = child.stderr.take().context("no stderr")?;
 
-    progress.set_status(DOWNLOADING);
     let expected = if request.trim().is_set() {
         0
     } else {
@@ -447,39 +465,45 @@ pub async fn download(
     if expected > 0 {
         progress.set_length(expected);
     }
-    let mut lines = BufReader::new(stdout).lines();
+    // Progress and the output path come on stdout; yt-dlp writes the
+    // postprocessor lines ([ytd-pp]) and errors to stderr, so read both.
+    let mut out_lines = BufReader::new(stdout).lines();
+    let mut err_lines = BufReader::new(stderr).lines();
+    let (mut out_open, mut err_open) = (true, true);
+    let mut stderr = String::new();
+    let mut started = false;
     let mut totals = Totals::default();
     let mut file: Option<PathBuf> = None;
     let mut ticker = tokio::time::interval(Duration::from_millis(150));
-    loop {
-        tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line.context("failed to read yt-dlp output")? else {
-                    break;
-                };
-                match parse_line(&line) {
-                    Line::Progress { downloaded, total, estimated, speed, eta, format } => {
-                        totals.update(format, downloaded, total, estimated);
-                        progress.set_estimated(totals.estimated());
-                        progress.set_length(totals.total(expected));
-                        progress.set_position(totals.downloaded());
-                        progress.set_rate(speed, eta);
+    while out_open || err_open {
+        let line = tokio::select! {
+            line = out_lines.next_line(), if out_open => {
+                match line.context("failed to read yt-dlp output")? {
+                    Some(line) => line,
+                    None => {
+                        out_open = false;
+                        continue;
                     }
-                    Line::Postprocess { started: true, name } => match name.as_str() {
-                        "Merger" => progress.set_status(MERGING),
-                        "ExtractAudio" | "VideoConvertor" | "VideoRemuxer" => {
-                            progress.set_status(CONVERTING)
-                        }
-                        _ => {}
-                    },
-                    Line::File(path) => file = Some(path),
-                    Line::Postprocess { .. } | Line::Other => {}
+                }
+            }
+            line = err_lines.next_line(), if err_open => {
+                match line {
+                    Ok(Some(line)) => {
+                        stderr.push_str(&line);
+                        stderr.push('\n');
+                        line
+                    }
+                    _ => {
+                        err_open = false;
+                        continue;
+                    }
                 }
             }
             _ = ticker.tick() => {
                 if let Err(error) = progress.check_control() {
                     kill_tree(&mut child).await;
-                    drop(lines);
+                    drop(out_lines);
+                    drop(err_lines);
                     // A stop can land while a pause is still killing yt-dlp:
                     // look at the flags again, stop wins.
                     let stopped = crate::progress::is_stopped(&error)
@@ -494,11 +518,34 @@ pub async fn download(
                     }
                     bail!(DownloadPaused);
                 }
+                continue;
             }
+        };
+        let parsed = parse_line(&line);
+        if let Some(status) = status_for(&parsed, started) {
+            started = true;
+            progress.set_status(status);
+        }
+        match parsed {
+            Line::Progress {
+                downloaded,
+                total,
+                estimated,
+                speed,
+                eta,
+                format,
+            } => {
+                totals.update(format, downloaded, total, estimated);
+                progress.set_estimated(totals.estimated());
+                progress.set_length(totals.total(expected));
+                progress.set_position(totals.downloaded());
+                progress.set_rate(speed, eta);
+            }
+            Line::File(path) => file = Some(path),
+            Line::Start | Line::Postprocess { .. } | Line::Other => {}
         }
     }
     let status = child.wait().await.context("yt-dlp did not exit")?;
-    let stderr = stderr_task.await.unwrap_or_default();
     if !status.success() {
         bail!("{}", error_line(&stderr));
     }
@@ -635,6 +682,62 @@ mod tests {
             Line::File(PathBuf::from("C:\\out\\a b.mp4"))
         );
         assert_eq!(parse_line("[youtube] Extracting URL"), Line::Other);
+    }
+
+    #[test]
+    fn start_marker_parses() {
+        assert_eq!(parse_line("[ytd-start] 137+140"), Line::Start);
+        assert_eq!(parse_line("[ytd-start] mp4\r"), Line::Start);
+    }
+
+    #[test]
+    fn stays_starting_until_the_transfer_begins() {
+        let progress = |downloaded| Line::Progress {
+            downloaded,
+            total: Some(100),
+            estimated: false,
+            speed: None,
+            eta: None,
+            format: "18".into(),
+        };
+        let merger = Line::Postprocess {
+            started: true,
+            name: "Merger".into(),
+        };
+        // Extraction noise changes nothing; the marker starts the download;
+        // later progress keeps it; the merge shows as merging.
+        let lines = [Line::Other, Line::Start, progress(10), progress(50), merger];
+        let mut started = false;
+        let mut seen = Vec::new();
+        for line in &lines {
+            let status = status_for(line, started);
+            started |= status.is_some();
+            seen.push(status);
+        }
+        assert_eq!(seen, [None, Some(DOWNLOADING), None, None, Some(MERGING)]);
+        // Without the marker the first progress line starts it.
+        assert_eq!(status_for(&progress(1), false), Some(DOWNLOADING));
+        assert_eq!(
+            status_for(
+                &Line::Postprocess {
+                    started: true,
+                    name: "ExtractAudio".into()
+                },
+                true
+            ),
+            Some(CONVERTING)
+        );
+        assert_eq!(
+            status_for(
+                &Line::Postprocess {
+                    started: false,
+                    name: "Merger".into()
+                },
+                true
+            ),
+            None,
+            "a finished postprocessor leaves the status alone"
+        );
     }
 
     #[test]
