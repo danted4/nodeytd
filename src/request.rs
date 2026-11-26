@@ -139,8 +139,18 @@ impl DownloadRequest {
     /// move: `.part` files, the streams of a merge, an mp3 job's source
     /// audio. Cleanup deletes this folder and nothing else, so a finished
     /// file in the download folder can never be mistaken for a leftover.
+    ///
+    /// Named by a short hash of the file name, not the name itself: the name
+    /// already appears in every partial file's name, and repeating it would
+    /// push long titles past Windows' 260-character path limit. The hash is
+    /// stable across restarts (resume finds its files again), and the folder
+    /// stays inside `.ytd-parts` whatever `name` holds (`..`, a separator,
+    /// or an empty name from a damaged `jobs.json`).
     pub fn partial_dir(&self) -> PathBuf {
-        self.dir.join(PARTS_DIR).join(&self.name)
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.name.as_bytes());
+        let folder: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+        self.dir.join(PARTS_DIR).join(folder)
     }
 
     /// Every yt-dlp argument for this download, URL last.
@@ -341,9 +351,15 @@ mod tests {
     #[test]
     fn partial_files_go_to_the_jobs_own_folder() {
         let req = request(DownloadKind::Merged);
+        let parts = req.partial_dir();
         assert_eq!(
-            req.partial_dir(),
-            PathBuf::from("/out").join(".ytd-parts").join("zoo")
+            parts.parent().unwrap(),
+            PathBuf::from("/out").join(".ytd-parts")
+        );
+        assert_eq!(
+            parts,
+            req.clone().partial_dir(),
+            "stable, so resume finds it"
         );
         let args = strings(&req.ytdlp_args(&tools()));
         let at = |flag: &str| args.iter().position(|a| a == flag).unwrap();
@@ -356,7 +372,27 @@ mod tests {
             .collect();
         assert_eq!(paths.len(), 2);
         assert!(paths[0].starts_with("home:") && paths[0].ends_with("out"));
-        assert!(paths[1].starts_with("temp:") && paths[1].ends_with("zoo"));
+        assert_eq!(*paths[1], format!("temp:{}", parts.display()));
+    }
+
+    #[test]
+    fn partial_folder_has_a_fixed_short_name_whatever_the_job_name() {
+        let mut long = request(DownloadKind::Merged);
+        long.name = "x".repeat(150);
+        let mut other = long.clone();
+        other.name = "y".repeat(150);
+        let parts = PathBuf::from("/out").join(".ytd-parts");
+        for req in [&long, &other] {
+            let dir = req.partial_dir();
+            assert_eq!(dir.parent().unwrap(), parts);
+            assert_eq!(dir.file_name().unwrap().len(), 12);
+        }
+        assert_ne!(long.partial_dir(), other.partial_dir());
+        for bad in ["..", ".", "", "a/../..", "/abs"] {
+            let mut req = request(DownloadKind::Merged);
+            req.name = bad.into();
+            assert_eq!(req.partial_dir().parent().unwrap(), parts, "{bad:?}");
+        }
     }
 
     #[test]

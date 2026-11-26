@@ -773,6 +773,14 @@ impl GuiApp {
         self.push_toast(text.into(), false, Some(Duration::from_secs(4)), None);
     }
 
+    fn job_url(&self, id: u64) -> Option<String> {
+        self.session
+            .jobs()
+            .into_iter()
+            .find(|job| job.id == id)
+            .map(|job| job.request.url)
+    }
+
     fn toast_fail(&mut self, text: impl Into<String>) {
         self.push_toast(text.into(), true, Some(Duration::from_secs(8)), None);
     }
@@ -1024,7 +1032,7 @@ impl GuiApp {
                             let _ = self.tx.send(WorkerCmd::Thumb { seq, url: thumb });
                         }
                     }
-                    Err(error) if cookies::is_sign_in_error(&error) => {
+                    Err(error) if cookies::youtube_wants_sign_in(&url, &error) => {
                         self.cookie_error = None;
                         self.fetch = Fetch::SignIn { url };
                     }
@@ -1088,7 +1096,9 @@ impl GuiApp {
         for event in self.session.drain_events() {
             match event {
                 SessionEvent::Finished { title, .. } => self.toast(format!("saved {title}")),
-                SessionEvent::Failed { title, error, .. } if cookies::is_sign_in_error(&error) => {
+                SessionEvent::Failed { id, title, error }
+                    if self.job_url(id).is_some_and(|url| cookies::youtube_wants_sign_in(&url, &error)) =>
+                {
                     self.toast_fail(format!(
                         "{title}: YouTube wants a signed-in browser. Choose one in settings → YouTube sign-in, then restart the download."
                     ))

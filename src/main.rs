@@ -107,11 +107,29 @@ async fn main() -> ExitCode {
         Err(error) => {
             let message = format!("{error:#}");
             eprintln!("Error: {message}");
-            if cookies::is_sign_in_error(&message) {
+            if error.downcast_ref::<NeedsSignIn>().is_some() {
                 eprintln!("{}", sign_in_hint());
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Marks a YouTube failure that a sign-in can fix (never another site's).
+#[derive(Debug)]
+struct NeedsSignIn;
+
+impl std::fmt::Display for NeedsSignIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("YouTube wants a signed-in browser")
+    }
+}
+
+fn mark_sign_in(url: &str, error: anyhow::Error) -> anyhow::Error {
+    if cookies::youtube_wants_sign_in(url, &format!("{error:#}")) {
+        error.context(NeedsSignIn)
+    } else {
+        error
     }
 }
 
@@ -124,7 +142,7 @@ fn sign_in_hint() -> String {
         found.join(" | ")
     };
     format!(
-        "YouTube wants a signed-in browser. Use your browser's YouTube sign-in:\n  \
+        "Use your browser's YouTube sign-in:\n  \
          ytd cookies browser <{browsers}>\n\
          or a cookies.txt export:\n  ytd cookies file <path>"
     )
@@ -334,7 +352,7 @@ async fn fetch(tools: &ToolPaths, url: &str) -> Result<VideoInfo> {
     let spinner = spinner("Fetching video info…");
     let result = ytdlp::fetch_info(tools, url).await;
     spinner.finish_and_clear();
-    result
+    result.map_err(|error| mark_sign_in(url, error))
 }
 
 async fn download(tools: &ToolPaths, request: &DownloadRequest) -> Result<()> {
@@ -361,7 +379,7 @@ async fn download(tools: &ToolPaths, request: &DownloadRequest) -> Result<()> {
         }
         Err(error) => {
             progress.abandon();
-            Err(error)
+            Err(mark_sign_in(&request.url, error))
         }
     }
 }

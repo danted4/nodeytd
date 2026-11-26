@@ -190,6 +190,12 @@ pub fn detect() -> Vec<Browser> {
         .collect()
 }
 
+/// A failure on `url` that a YouTube sign-in can fix. Other sites' login
+/// errors don't count: the sign-in is only ever sent to YouTube.
+pub fn youtube_wants_sign_in(url: &str, message: &str) -> bool {
+    crate::request::is_youtube_url(url) && is_sign_in_error(message)
+}
+
 /// yt-dlp's answer when YouTube wants a signed-in session.
 pub fn is_sign_in_error(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
@@ -275,6 +281,9 @@ mod tests {
             "[youtube] x: Sign in to confirm you’re not a bot. This helps protect our community. Use --cookies-from-browser or --cookies for the authentication."
         ));
         assert!(!is_sign_in_error("Video unavailable"));
+        let login = "This video is only available for registered users. Use --cookies-from-browser or --cookies";
+        assert!(youtube_wants_sign_in("https://youtu.be/x", login));
+        assert!(!youtube_wants_sign_in("https://vimeo.com/1", login));
     }
 
     #[test]
