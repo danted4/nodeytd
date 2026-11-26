@@ -215,6 +215,7 @@ fn spinner(message: &str) -> ProgressBar {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    println!("{}", ytd::banner());
     let cookie_override = match (cli.cookies_from, cli.cookies) {
         (Some(browser), _) => Some(browser_source(&browser)?),
         (None, Some(path)) => Some(CookieSource::File { path }),

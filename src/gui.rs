@@ -38,7 +38,7 @@ pub fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("ytd")
-            .with_title(format!("ytd {}", crate::VERSION))
+            .with_title(crate::banner())
             .with_inner_size(WINDOW_INNER)
             .with_min_inner_size(WINDOW_MIN)
             .with_icon(Arc::new(crate::icon::app_icon())),
@@ -1135,7 +1135,12 @@ impl GuiApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("ytd").size(20.0).strong().color(palette.fg));
+            ui.label(
+                RichText::new(crate::update::REPO)
+                    .size(20.0)
+                    .strong()
+                    .color(palette.fg),
+            );
             ui.label(RichText::new(format!("v{}", crate::VERSION)).color(palette.dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if settings_cog(ui, palette, self.show_settings).clicked() {
