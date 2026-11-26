@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.1.0
+
+- **Download folder on the main page:** the folder sits under the link box, as in torrenter. Click it to choose another one.
+- **Link box:** it has a border that lights up on hover and focus, and a **×** that clears it. The × or Esc starts over, also while a preview is loading. **dismiss** now clears the link too.
+- **Queue search:** filter downloads by title, link, folder, type, date or status.
+- **No more stuck 0%:** a new download shows **starting** with a sliding bar until the transfer begins, instead of an empty bar. A trimmed download, which has no size until it ends, keeps a sliding bar. **merging** and **converting** now show while ffmpeg finishes a file (yt-dlp reports them on stderr, which ytd did not read before).
+- Long titles in the queue are cut short instead of running under the buttons.
+
 ## 4.0.1
 
 - The GUI header, the window title and the CLI start with the `danted4/rustYTD v4.0.1` signature, as in torrenter.

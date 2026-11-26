@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, FontFamily, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextEdit, Vec2};
 
 use crate::config;
 use crate::cookies::{self, Browser, CookieSource};
@@ -32,6 +32,13 @@ const INDETERMINATE_HZ: f32 = 0.4;
 const SLIDER_REPAINT: Duration = Duration::from_millis(16);
 const THUMB: Vec2 = Vec2::new(208.0, 117.0);
 const THUMB_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Header rows, as in torrenter: the URL box and the download-folder row.
+const URL_H: f32 = 28.0;
+const DEST_H: f32 = 22.0;
+const GUTTER: f32 = 12.0;
+/// Room the × glyph takes at the right end of the URL box (beyond the usual
+/// 8 px text margin), so typed text stops short of it.
+const CLEAR_GLYPH_ROOM: f32 = 16.0;
 
 pub fn run() -> eframe::Result<()> {
     update::cleanup_replaced_binary();
@@ -198,11 +205,10 @@ fn apply_theme(ctx: &egui::Context, palette: Theme) {
 
 /// `None` draws the sliding indeterminate segment.
 fn bar_fraction(status: &str, downloaded: u64, total: u64) -> Option<f32> {
-    if progress::is_indeterminate(status) || (total == 0 && downloaded > 0) {
+    // No size yet (a trim, or the moment before the first progress line):
+    // slide instead of sitting at 0%.
+    if progress::is_indeterminate(status) || total == 0 {
         return None;
-    }
-    if total == 0 {
-        return Some(0.0);
     }
     Some((downloaded as f32 / total as f32).clamp(0.0, 1.0))
 }
@@ -412,6 +418,8 @@ enum WorkerCmd {
         url: String,
         tools: ToolPaths,
     },
+    /// Write the download folder to `config.json` off the GUI thread.
+    SaveDownloadDir(PathBuf),
 }
 
 enum WorkerEvent {
@@ -425,6 +433,8 @@ enum WorkerEvent {
         source: CookieSource,
         result: Result<(), String>,
     },
+    /// A `config.json` write from the worker finished.
+    ConfigSaved(Result<(), String>),
     Info {
         seq: u64,
         /// The URL this info is for: the text box may have changed since.
@@ -486,6 +496,16 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                 WorkerCmd::TestCookies { source, url, tools } => {
                     let result = ytdlp::test_cookies(&tools, &source, &url).await;
                     WorkerEvent::CookiesTested { source, result }
+                }
+                WorkerCmd::SaveDownloadDir(dir) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        config::edit_config(move |cfg| cfg.download_dir = Some(dir))
+                            .map(|_| ())
+                            .map_err(|e| format!("{e:#}"))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    WorkerEvent::ConfigSaved(result)
                 }
                 WorkerCmd::InstallApp {
                     update: available,
@@ -700,6 +720,8 @@ pub struct GuiApp {
     cookie_error: Option<String>,
     /// URL to fetch again once a sign-in source works.
     cookie_retry: Option<String>,
+    /// Filters the queue; not saved.
+    job_query: String,
 }
 
 impl GuiApp {
@@ -737,6 +759,7 @@ impl GuiApp {
             cookie_test: None,
             cookie_error: None,
             cookie_retry: None,
+            job_query: String::new(),
         };
         if let Hydrate::Corrupt(error) = app.session.hydrate() {
             app.toast_fail(format!("saved list was unreadable and was reset: {error}"));
@@ -1086,6 +1109,10 @@ impl GuiApp {
                         Err(reason) => self.cookie_error = Some(reason),
                     }
                 }
+                WorkerEvent::ConfigSaved(Err(error)) => {
+                    self.toast_fail(format!("could not save settings: {error}"))
+                }
+                WorkerEvent::ConfigSaved(Ok(())) => {}
                 WorkerEvent::AppInstalled(Err(error)) => {
                     self.toast_fail(format!("update failed: {error}"))
                 }
@@ -1206,26 +1233,117 @@ impl GuiApp {
         ui.add_space(6.0);
     }
 
+    /// The URL box: bordered (dim, lit on hover or focus), with a × that
+    /// clears it at its right end. Enter fetches; × or Esc start over.
     fn url_row(&mut self, ui: &mut egui::Ui) {
         let ready = matches!(self.tools_state, ToolsState::Ready);
         let palette = self.palette();
-        ui.horizontal(|ui| {
-            let button_w = 90.0;
-            let edit = egui::TextEdit::singleline(&mut self.url)
-                .hint_text(RichText::new("paste a video link and press Enter").color(palette.dim))
-                .desired_width((ui.available_width() - button_w).max(120.0));
-            let response = ui.add(edit);
-            let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let clicked = ui
-                .add_enabled(
-                    ready && !self.url.trim().is_empty(),
-                    egui::Button::new("fetch"),
-                )
-                .clicked();
-            if ready && (entered || clicked) {
-                self.start_fetch();
+        let mut clear = false;
+        let mut fetch = false;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), URL_H),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let gap = 8.0;
+                ui.spacing_mut().item_spacing.x = gap;
+                let button_w = 90.0;
+                let field_w = (ui.available_width() - gap - button_w).max(200.0);
+                let edit_w = (field_w - 16.0 - CLEAR_GLYPH_ROOM).max(160.0);
+                let input_id = ui.make_persistent_id("download-url");
+                let focused = ui.memory(|memory| memory.has_focus(input_id));
+                let mut edit = TextEdit::singleline(&mut self.url)
+                    .id(input_id)
+                    .font(FontId::new(14.0, FontFamily::Monospace))
+                    .desired_width(edit_w)
+                    .margin(egui::Margin {
+                        left: 8,
+                        right: 8 + CLEAR_GLYPH_ROOM as i8,
+                        top: 5,
+                        bottom: 5,
+                    });
+                if !focused {
+                    edit = edit.hint_text(
+                        RichText::new("paste a video link and press Enter").color(palette.dim),
+                    );
+                }
+                let field = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(field_w, URL_H),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            bordered_field(ui, palette);
+                            ui.add(edit)
+                        },
+                    )
+                    .inner;
+                if !self.url.is_empty() && clear_glyph(ui, palette, field.rect).clicked() {
+                    clear = true;
+                }
+                // egui drops focus on Esc, so look at both.
+                if (field.has_focus() || field.lost_focus())
+                    && ui.input(|input| input.key_pressed(egui::Key::Escape))
+                {
+                    clear = true;
+                }
+                let entered =
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                let clicked = ui
+                    .add_enabled(
+                        ready && !self.url.trim().is_empty(),
+                        egui::Button::new("fetch").min_size(egui::vec2(button_w, URL_H)),
+                    )
+                    .clicked();
+                fetch = ready && (entered || clicked);
+            },
+        );
+        if clear {
+            self.clear_input();
+        } else if fetch {
+            self.start_fetch();
+        }
+    }
+
+    /// Start over: empty the box and drop whatever the area below shows. A
+    /// fetch still running is abandoned (its result no longer matches
+    /// `fetch_seq`), and a sign-in test no longer refetches when it ends.
+    fn clear_input(&mut self) {
+        self.url.clear();
+        self.fetch_seq += 1;
+        self.fetch = Fetch::Idle;
+        self.cookie_retry = None;
+    }
+
+    /// The download folder under the URL box: click the glyph or the path to
+    /// choose another. New downloads go there; queued ones keep theirs.
+    fn folder_row(&mut self, ui: &mut egui::Ui) {
+        let palette = self.palette();
+        let (row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), DEST_H), Sense::hover());
+        let mut pick = false;
+        ui.allocate_new_ui(
+            egui::UiBuilder::new()
+                .max_rect(row)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let glyph = dest_glyph(ui, palette);
+                let full = self.download_dir.display().to_string();
+                let path = click_text(ui, truncate_middle(&full, 72), 12.0, palette.dim)
+                    .on_hover_text(full);
+                pick = glyph.clicked() || path.clicked();
+            },
+        );
+        if pick {
+            if let Some(dir) = pick_folder(&self.download_dir) {
+                self.set_download_dir(dir);
             }
-        });
+        }
+    }
+
+    fn set_download_dir(&mut self, dir: PathBuf) {
+        self.download_dir = dir.clone();
+        // The write happens on the worker: the GUI thread does no file I/O.
+        let _ = self.tx.send(WorkerCmd::SaveDownloadDir(dir));
     }
 
     fn fetch_area(&mut self, ui: &mut egui::Ui) {
@@ -1283,6 +1401,8 @@ impl GuiApp {
                 match self.session.queue(request) {
                     Ok(_) => {
                         self.fetch = Fetch::Idle;
+                        // A leftover search must not hide the new job.
+                        self.job_query.clear();
                         // Keep a link typed while this one was loading.
                         if self.url.trim() == queued_url {
                             self.url.clear();
@@ -1292,7 +1412,15 @@ impl GuiApp {
                     Err(error) => self.toast_fail(error),
                 }
             }
-            Some(DraftAction::Dismiss) => self.fetch = Fetch::Idle,
+            Some(DraftAction::Dismiss) => {
+                // Clear the link too, unless another one was typed meanwhile.
+                if let Fetch::Ready(draft) = &self.fetch {
+                    if self.url.trim() == draft.url {
+                        self.url.clear();
+                    }
+                }
+                self.fetch = Fetch::Idle;
+            }
             None => {}
         }
     }
@@ -1310,14 +1438,32 @@ impl GuiApp {
             });
         });
         if jobs.is_empty() {
+            self.job_query.clear();
             ui.label(RichText::new("nothing yet: paste a link above").color(palette.dim));
+            return;
+        }
+        search_row(
+            ui,
+            palette,
+            &mut self.job_query,
+            "job-search",
+            "type something…",
+        );
+        ui.add_space(6.0);
+        let visible: Vec<&Job> = jobs
+            .iter()
+            .rev()
+            .filter(|job| job_matches(job, &self.job_query))
+            .collect();
+        if visible.is_empty() {
+            ui.label(RichText::new("no jobs match that search").color(palette.dim));
             return;
         }
         let mut actions = Vec::new();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (index, job) in jobs.iter().rev().enumerate() {
+                for (index, job) in visible.into_iter().enumerate() {
                     if let Some(action) = job_row(ui, job, palette, index % 2 == 1) {
                         actions.push(action);
                     }
@@ -1703,11 +1849,6 @@ fn draft_ui(
             if ui.button("dismiss").clicked() {
                 action = Some(DraftAction::Dismiss);
             }
-            ui.label(
-                RichText::new(format!("→ {}", dir.display()))
-                    .size(11.0)
-                    .color(palette.dim),
-            );
         });
     });
     action
@@ -1741,6 +1882,186 @@ fn format_combo(
         });
 }
 
+// ------------------------------------------------- header and search (torrenter)
+
+/// A text field's border: dim, lit on hover or focus, never growing.
+fn bordered_field(ui: &mut egui::Ui, palette: Theme) {
+    let dim = Stroke::new(1.0_f32, palette.dim);
+    let lit = Stroke::new(1.0_f32, palette.fg);
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.inactive.bg_stroke = dim;
+    widgets.hovered.bg_stroke = lit;
+    widgets.active.bg_stroke = lit;
+    widgets.open.bg_stroke = lit;
+    widgets.hovered.expansion = 0.0;
+    widgets.active.expansion = 0.0;
+    widgets.open.expansion = 0.0;
+}
+
+fn click_cursor(response: egui::Response) -> egui::Response {
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn click_text(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    size: f32,
+    color: Color32,
+) -> egui::Response {
+    click_cursor(
+        ui.add(
+            egui::Label::new(RichText::new(text.into()).size(size).color(color))
+                .selectable(false)
+                .truncate()
+                .sense(Sense::click()),
+        ),
+    )
+}
+
+/// Inside the URL box, at its right end: clear it.
+fn clear_glyph(ui: &mut egui::Ui, palette: Theme, field: egui::Rect) -> egui::Response {
+    const ARM: f32 = 4.0;
+    let center = egui::pos2(field.right() - 8.0 - ARM, field.center().y);
+    let hit = egui::Rect::from_center_size(center, egui::vec2(18.0, 18.0));
+    // click_and_drag, like the TextEdit under it: otherwise egui gives the
+    // press's drag to the TextEdit, which takes focus and moves the caret.
+    let response = ui.interact(
+        hit,
+        ui.id().with("url-clear-glyph"),
+        Sense::click_and_drag(),
+    );
+    let color = if response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    let stroke = Stroke::new(1.4_f32, color);
+    let painter = ui.painter();
+    painter.line_segment(
+        [
+            center + egui::vec2(-ARM, -ARM),
+            center + egui::vec2(ARM, ARM),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(-ARM, ARM),
+            center + egui::vec2(ARM, -ARM),
+        ],
+        stroke,
+    );
+    click_cursor(response).on_hover_text("clear (Esc)")
+}
+
+fn dest_glyph(ui: &mut egui::Ui, palette: Theme) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
+    paint_folder(ui.painter(), rect, palette.fg);
+    click_cursor(response).on_hover_text("choose download folder")
+}
+
+fn paint_folder(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let stroke = Stroke::new(1.2_f32, color);
+    let tab = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 1.5, rect.top() + 3.0),
+        egui::pos2(rect.left() + 7.0, rect.top() + 6.5),
+    );
+    let body = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 1.5, rect.top() + 6.0),
+        egui::pos2(rect.right() - 1.5, rect.bottom() - 2.0),
+    );
+    painter.rect_stroke(tab, 1.0, stroke, egui::StrokeKind::Inside);
+    painter.rect_stroke(body, 1.2, stroke, egui::StrokeKind::Inside);
+}
+
+fn pick_folder(start: &Path) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("download folder");
+    if start.exists() {
+        dialog = dialog.set_directory(start);
+    } else if let Some(parent) = start.parent().filter(|path| path.exists()) {
+        dialog = dialog.set_directory(parent);
+    }
+    dialog.pick_folder()
+}
+
+/// Keep both ends of a long path: `/Users/me/Dow…/ytd`.
+fn truncate_middle(value: &str, max: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= max {
+        return value.to_string();
+    }
+    if max <= 1 {
+        return "…".into();
+    }
+    let keep = max - 1;
+    let left = keep / 2;
+    let right = keep - left;
+    format!(
+        "{}…{}",
+        chars[..left].iter().collect::<String>(),
+        chars[chars.len() - right..].iter().collect::<String>()
+    )
+}
+
+/// The search field above the queue: label, a bordered field that lights up
+/// on hover or focus, Esc clears it.
+fn search_row(ui: &mut egui::Ui, palette: Theme, query: &mut String, id_salt: &str, hint: &str) {
+    const SEARCH_H: f32 = 28.0;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), SEARCH_H),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(RichText::new("search").size(12.0).color(palette.dim));
+            let search_id = ui.make_persistent_id(id_salt);
+            let focused = ui.memory(|memory| memory.has_focus(search_id));
+            let field_w = ui.available_width().max(160.0);
+            let mut edit = TextEdit::singleline(query)
+                .id(search_id)
+                .font(FontId::new(14.0, FontFamily::Monospace))
+                .desired_width((field_w - 16.0).max(120.0))
+                .margin(egui::Margin::symmetric(8, 5));
+            if !focused {
+                edit = edit.hint_text(RichText::new(hint).color(palette.dim));
+            }
+            let response = ui.allocate_ui_with_layout(
+                egui::vec2(field_w, SEARCH_H),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    bordered_field(ui, palette);
+                    ui.add(edit)
+                },
+            );
+            let field = response.inner;
+            if (field.has_focus() || field.lost_focus())
+                && ui.input(|input| input.key_pressed(egui::Key::Escape))
+            {
+                query.clear();
+            }
+        },
+    );
+}
+
+/// Kind, link, title, folder, date added or status contains the query.
+fn job_matches(job: &Job, query: &str) -> bool {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return true;
+    }
+    let needle = needle.to_lowercase();
+    [
+        job.request.kind.label().to_string(),
+        job.request.kind.short().to_string(),
+        job.request.url.clone(),
+        job.request.title.clone(),
+        job.request.dir.display().to_string(),
+        job.added.clone(),
+        job.snapshot.status(),
+    ]
+    .iter()
+    .any(|field| field.to_lowercase().contains(&needle))
+}
+
 fn job_row(ui: &mut egui::Ui, job: &Job, palette: Theme, alt: bool) -> Option<RowAction> {
     let snap = &job.snapshot;
     let status = snap.status();
@@ -1756,28 +2077,9 @@ fn job_row(ui: &mut egui::Ui, job: &Job, palette: Theme, alt: bool) -> Option<Ro
         .inner_margin(10)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Buttons first, from the right; the kind and title get what is
+            // left, so a long title is cut short instead of running under them.
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(job.request.kind.short())
-                        .size(11.0)
-                        .color(palette.dim),
-                );
-                let folder = snap
-                    .output()
-                    .and_then(|p| p.parent().map(Path::to_path_buf))
-                    .unwrap_or_else(|| job.request.dir.clone());
-                let title = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(&job.request.title).color(row_accent(palette, done)),
-                        )
-                        .truncate()
-                        .sense(Sense::click()),
-                    )
-                    .on_hover_text(format!("{}\nclick to open the folder", job.request.url));
-                if title.clicked() {
-                    action = Some(RowAction::Open(folder));
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(&job.added).size(11.0).color(palette.dim));
                     let button = |ui: &mut egui::Ui, text: &str, color: Color32| {
@@ -1807,6 +2109,33 @@ fn job_row(ui: &mut egui::Ui, job: &Job, palette: Theme, alt: bool) -> Option<Ro
                             action = Some(RowAction::TogglePause(job.id));
                         }
                     }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(job.request.kind.short())
+                                .size(11.0)
+                                .color(palette.dim),
+                        );
+                        let folder = snap
+                            .output()
+                            .and_then(|p| p.parent().map(Path::to_path_buf))
+                            .unwrap_or_else(|| job.request.dir.clone());
+                        let title = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(&job.request.title)
+                                        .color(row_accent(palette, done)),
+                                )
+                                .truncate()
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_text(format!(
+                                "{}\nclick to open the folder",
+                                job.request.url
+                            ));
+                        if title.clicked() {
+                            action = Some(RowAction::Open(folder));
+                        }
+                    });
                 });
             });
             let accent = row_accent(palette, finished);
@@ -1864,7 +2193,13 @@ impl eframe::App for GuiApp {
                     .fill(self.palette().bg)
                     .inner_margin(egui::Margin::symmetric(14, 10)),
             )
-            .show(ctx, |ui| self.top_bar(ui));
+            .show(ctx, |ui| {
+                self.top_bar(ui);
+                ui.add_space(GUTTER);
+                self.url_row(ui);
+                ui.add_space(GUTTER / 2.0);
+                self.folder_row(ui);
+            });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -1874,8 +2209,6 @@ impl eframe::App for GuiApp {
             .show(ctx, |ui| {
                 ui.add_space(10.0);
                 self.tools_banner(ui);
-                self.url_row(ui);
-                ui.add_space(4.0);
                 self.fetch_area(ui);
                 ui.add_space(8.0);
                 self.queue_ui(ui);
@@ -1913,7 +2246,11 @@ mod tests {
     #[test]
     fn fractions() {
         assert_eq!(bar_fraction(progress::DOWNLOADING, 50, 100), Some(0.5));
-        assert_eq!(bar_fraction(progress::DOWNLOADING, 0, 0), Some(0.0));
+        assert_eq!(
+            bar_fraction(progress::DOWNLOADING, 0, 0),
+            None,
+            "no size yet slides instead of sitting at 0%"
+        );
         assert_eq!(bar_fraction(progress::MERGING, 50, 100), None);
         assert_eq!(
             bar_fraction(progress::DOWNLOADING, 10, 0),
@@ -1929,6 +2266,61 @@ mod tests {
             let offset = indeterminate_offset(step as f32 * 0.1, 0.28);
             assert!((0.0..=0.72 + f32::EPSILON).contains(&offset));
         }
+    }
+
+    #[test]
+    fn middle_truncation_keeps_ends() {
+        assert_eq!(truncate_middle("short", 16), "short");
+        let value = truncate_middle("/Users/me/Downloads/ytd/very-long-name", 16);
+        assert_eq!(value.chars().count(), 16);
+        assert!(value.starts_with("/Users/"));
+        assert!(value.ends_with("ong-name"), "{value}");
+        assert!(value.contains('…'));
+        assert_eq!(truncate_middle("abc", 1), "…");
+    }
+
+    fn sample_job(title: &str, url: &str, dir: &str) -> Job {
+        let request = DownloadRequest {
+            url: url.into(),
+            title: title.into(),
+            kind: DownloadKind::Audio,
+            video_format: None,
+            audio_format: Some("140".into()),
+            name: "clip".into(),
+            dir: PathBuf::from(dir),
+            trim_start: None,
+            trim_end: None,
+            expected_size: 0,
+        };
+        Job {
+            id: 1,
+            request,
+            snapshot: Arc::new(JobSnapshot::default()),
+            added: "2026-11-26 10:00".into(),
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn empty_search_matches_every_job() {
+        let job = sample_job("Sintel", "https://example.com/v", "/tmp/ytd");
+        assert!(job_matches(&job, ""));
+        assert!(job_matches(&job, "   "));
+    }
+
+    #[test]
+    fn search_matches_title_url_and_folder() {
+        let job = sample_job(
+            "Sintel Trailer",
+            "https://example.com/watch?v=abc",
+            "/tmp/clips",
+        );
+        assert!(job_matches(&job, "sintel"));
+        assert!(job_matches(&job, "watch?v=ABC"));
+        assert!(job_matches(&job, "clips"));
+        assert!(job_matches(&job, "queued"), "status");
+        assert!(job_matches(&job, "2026-11-26"), "date added");
+        assert!(!job_matches(&job, "big buck bunny"));
     }
 
     #[test]
