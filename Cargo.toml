@@ -1,10 +1,10 @@
 [package]
 name = "ytd"
-version = "4.0.1"
+version = "4.1.0"
 edition = "2021"
 description = "Desktop video downloader (GUI and CLI) built on yt-dlp and ffmpeg, with a download queue and auto-installed tools."
 license = "ISC"
-repository = "https://github.com/danted4/rustYTD"
+repository = "https://github.com/danted4/ytd"
 readme = "readme.md"
 keywords = ["youtube", "yt-dlp", "downloader", "ffmpeg", "gui"]
 rust-version = "1.85"

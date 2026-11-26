@@ -14,8 +14,10 @@ use anyhow::{bail, Context, Result};
 use crate::progress::{ProgressHandle, VERIFYING};
 use crate::tools::{self, Github};
 
-/// GitHub redirects the API and downloads if the repo is renamed.
-pub const REPO: &str = "danted4/rustYTD";
+/// Renamed from `danted4/rustYTD` in 4.1.0 (and `nodeytd` before that).
+/// GitHub redirects the old names' API, but an older build's download pin
+/// still names its own repo, so 4.0.x has to be updated by hand once.
+pub const REPO: &str = "danted4/ytd";
 const MAX_BYTES: u64 = 120 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

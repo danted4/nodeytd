@@ -1,52 +1,56 @@
-# rustYTD &nbsp;  &nbsp; <a href="#windows"><img src="docs/os-windows.svg" alt="Windows" width="28" height="28" align="absmiddle"></a> <a href="#macos"><img src="docs/os-macos.svg" alt="macOS" width="28" height="28" align="absmiddle"></a> <a href="#linux"><img src="docs/os-linux.svg" alt="Linux" width="28" height="28" align="absmiddle"></a>
+# ytd &nbsp;  &nbsp; <a href="#windows"><img src="docs/os-windows.svg" alt="Windows" width="28" height="28" align="absmiddle"></a> <a href="#macos"><img src="docs/os-macos.svg" alt="macOS" width="28" height="28" align="absmiddle"></a> <a href="#linux"><img src="docs/os-linux.svg" alt="Linux" width="28" height="28" align="absmiddle"></a>
 
 Desktop video downloader with a GUI and a CLI, built on [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org). Paste a link, see a preview, pick what you want, and follow the download queue.
 
 | Platform&nbsp;/&nbsp;system | How to get it | Notes |
 |---|---|---|
-| <img src="docs/os-windows.svg" alt="Windows" width="22" height="22" align="absmiddle">&nbsp;**[Windows](#windows)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-x86_64-pc-windows-msvc.exe` (GUI), `ytd-x86_64-pc-windows-msvc.exe` (CLI) | Windows 10/11, x64 |
-| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-<arch>-apple-darwin.app.zip` (GUI), `ytd-<arch>-apple-darwin` (CLI); `aarch64` or `x86_64` | Apple silicon and Intel |
-| <img src="docs/os-linux.svg" alt="Linux" width="22" height="22" align="absmiddle">&nbsp;**[Linux](#linux)** | [Release](https://github.com/danted4/rustYTD/releases/latest): `ytd-gui-x86_64-unknown-linux-gnu` (GUI), `ytd-x86_64-unknown-linux-gnu` (CLI) | x64; GUI needs GTK&nbsp;3 |
+| <img src="docs/os-windows.svg" alt="Windows" width="22" height="22" align="absmiddle">&nbsp;**[Windows](#windows)** | [Release](https://github.com/danted4/ytd/releases/latest): `ytd-gui-x86_64-pc-windows-msvc.exe` (GUI), `ytd-x86_64-pc-windows-msvc.exe` (CLI) | Windows 10/11, x64 |
+| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/ytd/releases/latest): `ytd-gui-<arch>-apple-darwin.app.zip` (GUI), `ytd-<arch>-apple-darwin` (CLI); `aarch64` or `x86_64` | Apple silicon and Intel |
+| <img src="docs/os-linux.svg" alt="Linux" width="22" height="22" align="absmiddle">&nbsp;**[Linux](#linux)** | [Release](https://github.com/danted4/ytd/releases/latest): `ytd-gui-x86_64-unknown-linux-gnu` (GUI), `ytd-x86_64-unknown-linux-gnu` (CLI) | x64; GUI needs GTK&nbsp;3 |
 
-**rustYTD gui**
+**ytd gui**
 
-![rustYTD gui: a video preview with format choices above a queue with one download running and two finished](docs/gui-4.0.1.png)
+![ytd gui: the link box and download folder at the top, a video preview with format choices, and a queue with one download running and one finished](docs/gui-4.1.0.png)
 
 <table>
    <tr>
    <th>
       queue (phosphor theme)
    </th>
+   </tr>
+   <tr>
+   <td>
+      <img src="docs/queue-4.1.0.png" alt="Queue in the green phosphor theme with the search box: one paused download and three finished">
+   </td>
+   </tr>
+   <tr>
    <th>
-      settings
+      settings (violet theme)
    </th>
    </tr>
    <tr>
    <td>
-      <img src="docs/queue-4.0.1.png" alt="Queue in the green phosphor theme: one paused download and two finished" height="220">
-   </td>
-   <td>
-      <img src="docs/settings-4.0.1.png" alt="Settings in the violet theme: download folder, downloads at once, colour themes and the YouTube sign-in in use (Firefox)" height="220">
+      <img src="docs/settings-4.1.0.png" alt="The settings page in the violet theme: tabs for appearance, downloads, YouTube sign-in and updates, with the colour themes and the macOS window tint">
    </td>
    </tr>
    <tr>
-   <th colspan="2">
+   <th>
       youtube sign-in (when YouTube asks to confirm you're not a bot)
    </th>
    </tr>
    <tr>
-   <td colspan="2">
-      <img src="docs/signin-4.0.1.png" alt="The YouTube sign-in card listing the browsers found on the computer and a cookies.txt import">
+   <td>
+      <img src="docs/signin-4.1.0.png" alt="The YouTube sign-in card listing the browsers found on the computer and a cookies.txt import">
    </td>
    </tr>
    <tr>
-   <th colspan="2">
-      rustYTD cli
+   <th>
+      ytd cli
    </th>
    </tr>
    <tr>
-   <td colspan="2">
-      <img src="docs/cli-4.0.1.png" alt="ytd get downloading a 30-second mp3 clip from the command line">
+   <td>
+      <img src="docs/cli-4.1.0.png" alt="ytd get downloading a 30-second mp3 clip from the command line">
    </td>
    </tr>
 </table>
@@ -60,7 +64,7 @@ Screenshots use Blender Studio's open movies (Creative Commons).
 
 ## Windows
 
-1. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest).
+1. Open the [latest release](https://github.com/danted4/ytd/releases/latest).
 2. Download the GUI and/or the CLI:
    - GUI: `ytd-gui-x86_64-pc-windows-msvc.exe`
    - CLI: `ytd-x86_64-pc-windows-msvc.exe`
@@ -78,7 +82,7 @@ If Explorer still blocks the file: right-click it → **Properties** → tick **
 
 ## macOS
 
-1. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest) and download the files for your Mac (Apple silicon `aarch64`, Intel `x86_64`):
+1. Open the [latest release](https://github.com/danted4/ytd/releases/latest) and download the files for your Mac (Apple silicon `aarch64`, Intel `x86_64`):
    - GUI: `ytd-gui-<arch>-apple-darwin.app.zip`, or the plain binary `ytd-gui-<arch>-apple-darwin`
    - CLI: `ytd-<arch>-apple-darwin`
 2. **GUI:** double-click the `.app.zip` to unzip **`ytd.app`** and drag it to **Applications**. The builds are not signed, so clear the quarantine flag GitHub downloads get:
@@ -102,7 +106,7 @@ Inside `ytd.app`, auto-update tells you about a new version instead of installin
 
 ## Linux
 
-1. Open the [latest release](https://github.com/danted4/rustYTD/releases/latest).
+1. Open the [latest release](https://github.com/danted4/ytd/releases/latest).
 2. Download the GUI and/or the CLI:
    - GUI: `ytd-gui-x86_64-unknown-linux-gnu`
    - CLI: `ytd-x86_64-unknown-linux-gnu`
@@ -124,7 +128,7 @@ Inside `ytd.app`, auto-update tells you about a new version instead of installin
 
 ### Checksums
 
-`SHA256SUMS` in each release lists the checksum of every file. No Rust is needed to run rustYTD; building from source is under [Build from source](#build-from-source).
+`SHA256SUMS` in each release lists the checksum of every file. No Rust is needed to run ytd; building from source is under [Build from source](#build-from-source).
 
 ## GUI
 
@@ -202,7 +206,7 @@ Ctrl-C cancels a download and removes its partial files.
 
 ## Where things go
 
-- **Downloads:** `Downloads/rustYTD` (change it in settings).
+- **Downloads:** `Downloads/ytd` (change it with the folder under the link box).
 - **Unfinished downloads:** each one keeps its partial files in its own folder under `.ytd-parts` inside the download folder. Stop or remove deletes that folder only; finished files are never touched.
 - **Settings, job list and tools:**
   - Windows: `%APPDATA%\ytd`
@@ -223,13 +227,13 @@ On Linux the GUI needs `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-
 
 ## Responsible use
 
-rustYTD is a general-purpose tool built on yt-dlp. Download only what you have the right to download: your own uploads, videos under a licence that allows it (such as Creative Commons), or content the rights holder lets you save.
+ytd is a general-purpose tool built on yt-dlp. Download only what you have the right to download: your own uploads, videos under a licence that allows it (such as Creative Commons), or content the rights holder lets you save.
 
 - Saving a video for personal offline viewing can still go against a site's terms. YouTube's terms, for example, only allow downloads where YouTube offers a download button or link. Copyright law also differs from country to country, so check what applies where you live.
-- Don't use rustYTD to redistribute, re-upload or sell other people's content, or to get around paywalls. It does not decrypt DRM-protected media.
+- Don't use ytd to redistribute, re-upload or sell other people's content, or to get around paywalls. It does not decrypt DRM-protected media.
 - YouTube sign-in sends your own browser's YouTube cookies, so downloads are made as your account and YouTube's terms apply to that account.
 
-rustYTD is not affiliated with YouTube, Google, yt-dlp, FFmpeg or Deno. It is provided as is, without warranty, and its authors are not liable for how it is used; see the [license](LICENSE).
+ytd is not affiliated with YouTube, Google, yt-dlp, FFmpeg or Deno. It is provided as is, without warranty, and its authors are not liable for how it is used; see the [license](LICENSE).
 
 ## License
 
@@ -237,4 +241,4 @@ rustYTD is not affiliated with YouTube, Google, yt-dlp, FFmpeg or Deno. It is pr
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=danted4/rustYTD&type=Date)](https://star-history.com/#danted4/rustYTD&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=danted4/ytd&type=Date)](https://star-history.com/#danted4/ytd&Date)
