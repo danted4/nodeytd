@@ -709,9 +709,6 @@ mod tests {
         assert_eq!(parse_line("[youtube] Extracting URL"), Line::Other);
     }
 
-    /// A fake yt-dlp that floods stderr with more than a pipe buffer of
-    /// bytes that are not UTF-8, reports a merge there, and then the file.
-    /// The download must drain it all and finish (it used to hang).
     #[tokio::test]
     async fn a_file_as_the_folder_gets_a_clear_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -744,6 +741,9 @@ mod tests {
         assert!(err.contains("--dir"), "{err}");
     }
 
+    /// A fake yt-dlp that floods stderr with more than a pipe buffer of
+    /// bytes that are not UTF-8, reports a merge there, and then the file.
+    /// The download must drain it all and finish (it used to hang).
     #[cfg(unix)]
     #[tokio::test]
     async fn non_utf8_stderr_does_not_hang_and_merging_shows() {
