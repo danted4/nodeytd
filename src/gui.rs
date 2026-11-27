@@ -32,6 +32,8 @@ const INDETERMINATE_HZ: f32 = 0.4;
 const SLIDER_REPAINT: Duration = Duration::from_millis(16);
 const THUMB: Vec2 = Vec2::new(208.0, 117.0);
 const THUMB_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Toast shown while "update tools" asks GitHub what is out of date.
+const CHECKING_TOOLS: &str = "checking tools…";
 /// Header rows, as in torrenter: the URL box and the download-folder row.
 const URL_H: f32 = 28.0;
 const DEST_H: f32 = 22.0;
@@ -452,6 +454,8 @@ enum WorkerCmd {
     },
     /// Auto-update: look for a newer ytd release and outdated tools.
     CheckUpdates,
+    /// "update tools" was pressed: which tools need installing?
+    CheckTools,
     InstallApp {
         update: AvailableUpdate,
         snapshot: Arc<JobSnapshot>,
@@ -472,6 +476,8 @@ enum WorkerCmd {
 
 enum WorkerEvent {
     ToolsDone(Result<ToolPaths, String>),
+    /// The tools "update tools" should install; empty when all are current.
+    ToolsChecked(Result<Vec<Tool>, String>),
     UpdatesChecked {
         app: Result<Option<AvailableUpdate>, String>,
         tools: Vec<Tool>,
@@ -555,6 +561,9 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                     // A failed tool check is not worth a toast: retried next launch.
                     tools: tools::outdated().await.unwrap_or_default(),
                 },
+                WorkerCmd::CheckTools => WorkerEvent::ToolsChecked(
+                    tools::needing_update().await.map_err(|e| format!("{e:#}")),
+                ),
                 WorkerCmd::TestCookies { source, url, tools } => {
                     let result = ytdlp::test_cookies(&tools, &source, &url).await;
                     WorkerEvent::CookiesTested { source, result }
@@ -780,6 +789,8 @@ pub struct GuiApp {
     /// Tool versions and paths for the updates tab: read when settings
     /// opens or the tools change, never on every frame.
     tool_rows: Option<Vec<ToolRow>>,
+    /// "update tools" is asking GitHub which tools are out of date.
+    tools_checking: bool,
     /// macOS window glass (torrenter): saved tint, and what is painted now.
     glass_tint: u8,
     glass_applied: bool,
@@ -864,6 +875,7 @@ impl GuiApp {
             job_query: String::new(),
             settings_tab: SettingsTab::default(),
             tool_rows: None,
+            tools_checking: false,
             glass_tint: initial_glass_tint(cfg.glass_tint),
             glass_applied: false,
             glass_attempts: 0,
@@ -1168,6 +1180,22 @@ impl GuiApp {
                                 Ok(paths) => self.tools_ready(paths, false),
                                 Err(_) => self.tools_state = ToolsState::Failed(error),
                             }
+                        }
+                    }
+                }
+                WorkerEvent::ToolsChecked(result) => {
+                    self.tools_checking = false;
+                    self.toasts.retain(|toast| toast.text != CHECKING_TOOLS);
+                    match result {
+                        Ok(wanted) if wanted.is_empty() => self.toast("tools are up to date"),
+                        // A download started while GitHub answered: a
+                        // running yt-dlp must not be replaced under it.
+                        Ok(_) if self.session.any_running() => {
+                            self.toast_fail("wait for downloads to finish, then update tools")
+                        }
+                        Ok(wanted) => self.setup_tools(Some(wanted)),
+                        Err(error) => {
+                            self.toast_fail(format!("could not check for tool updates: {error}"))
                         }
                     }
                 }
@@ -1856,6 +1884,7 @@ impl GuiApp {
             );
         }
         let busy = self.session.any_running() || matches!(self.tools_state, ToolsState::Installing);
+        let checking = self.tools_checking;
         let mut update_tools = false;
         settings_card(ui, fill, palette, |ui| {
             for (index, row) in self.tool_rows.iter().flatten().enumerate() {
@@ -1875,7 +1904,12 @@ impl GuiApp {
             }
             tile_divider(ui, palette);
             ui.horizontal(|ui| {
-                let response = ui.add_enabled(!busy, egui::Button::new("update tools"));
+                let label = if checking {
+                    "checking…"
+                } else {
+                    "update tools"
+                };
+                let response = ui.add_enabled(!busy && !checking, egui::Button::new(label));
                 if response.clicked() {
                     update_tools = true;
                 }
@@ -1890,7 +1924,11 @@ impl GuiApp {
             });
         });
         if update_tools {
-            self.setup_tools(Some(tools::managed()));
+            // Only what is missing or behind its latest release gets
+            // downloaded; GitHub is asked now, off the GUI thread.
+            self.tools_checking = true;
+            self.push_toast(CHECKING_TOOLS.into(), false, None, None);
+            let _ = self.tx.send(WorkerCmd::CheckTools);
         }
     }
 

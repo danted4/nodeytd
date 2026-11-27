@@ -96,8 +96,13 @@ enum ToolsAction {
     Status,
     /// Install whatever is missing.
     Install,
-    /// Re-install the tools ytd manages to their latest releases.
-    Update,
+    /// Update the tools ytd manages that are behind their latest release
+    /// (and install missing ones).
+    Update {
+        /// Re-install every tool ytd manages, even ones already up to date.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -432,8 +437,18 @@ async fn tools_command(action: ToolsAction) -> Result<()> {
             println!("Tools ready.");
             Ok(())
         }
-        ToolsAction::Update => {
+        ToolsAction::Update { force: true } => {
             tools::update_all(|tool| ProgressHandle::cli(tool.key())).await?;
+            println!("Tools re-installed.");
+            Ok(())
+        }
+        ToolsAction::Update { force: false } => {
+            let wanted = tools::needing_update().await?;
+            if wanted.is_empty() {
+                println!("All tools are up to date.");
+                return Ok(());
+            }
+            tools::update_tools(&wanted, |tool| ProgressHandle::cli(tool.key())).await?;
             println!("Tools updated.");
             Ok(())
         }

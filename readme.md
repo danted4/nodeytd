@@ -162,7 +162,7 @@ Top bar:
   - **appearance**: colour theme, and on macOS the **window tint** (how strongly the theme colour sits on the frosted window; locked at 100% in fullscreen)
   - **downloads**: downloads at once
   - **YouTube sign-in**: see below
-  - **updates**: auto-update, tool versions, **update tools** and **open tools folder**
+  - **updates**: auto-update, tool versions, **update tools** and **open tools folder**. **update tools** asks GitHub when you press it and downloads only the tools that are missing or behind their latest release; otherwise it says they are up to date.
 
 On macOS the window is frosted glass, as in torrenter. Windows and Linux stay opaque.
 
@@ -183,9 +183,11 @@ Supported browsers: Firefox, Chrome, Edge, Brave, Opera, Vivaldi, Chromium, Safa
 ytd                      interactive prompts (URL, type, quality, name, trim)
 ytd get <url> [options]  download without prompts
 ytd formats <url>        list the formats a video offers
-ytd tools [status|install|update]
+ytd tools [status|install|update [--force]]
 ytd cookies [status|browser <name>|file <path>|off]
 ```
+
+`ytd tools update` downloads only the tools that are behind their latest release; `--force` re-installs all of them.
 
 `ytd cookies browser firefox` (or `file cookies.txt`) tests the browser's YouTube sign-in and, if it works, uses it from then on. For a single run, add `--cookies-from <browser>` or `--cookies <file>` to any command.
 
