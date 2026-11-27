@@ -102,7 +102,7 @@ If Explorer still blocks the file: right-click it → **Properties** → tick **
    ./ytd-aarch64-apple-darwin
    ```
 
-With auto-update on, `ytd.app` updates itself in place from 4.1.2 on (it replaces its binary, stamps the new version and signs the app again). Versions up to 4.1.1 only announce a new version: install 4.1.2 by hand once.
+With auto-update on, `ytd.app` updates itself in place from 4.1.2 on (it replaces its binary, stamps the new version and signs the app again). Versions up to 4.1.1 only announce a new version: install 4.1.2 by hand once. Move `ytd.app` to Applications first: an app run from Downloads (or from a folder you can't write to) only announces updates.
 
 ## Linux
 

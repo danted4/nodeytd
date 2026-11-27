@@ -152,10 +152,39 @@ async fn install_to(
     .await;
     if result.is_err() {
         let _ = std::fs::remove_file(&staged);
-    } else {
-        refresh_installed_app(exe, &update.tag);
+        return result;
     }
-    result
+    refresh_installed_app(exe, &update.tag).with_context(|| {
+        format!(
+            "ytd {} is installed, but ytd.app could not be signed again; if it does not open, \
+             download the .app.zip from github.com/{REPO}/releases",
+            update.tag
+        )
+    })
+}
+
+/// Whether this install can replace its own binary: not a quarantined
+/// `.app` that macOS runs from a read-only translocated copy, and its
+/// folder is writable (a non-admin user, a read-only volume or a system
+/// folder is not). When it can't, a new version is only announced.
+pub fn can_self_replace() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
+        return false;
+    }
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let probe = dir.join(format!(".ytd-write-test-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// `ytd.app`'s `Info.plist`: written by `macos-app` at release time and
@@ -256,21 +285,25 @@ fn stamp_app_bundle(app: &Path, tag: &str) -> Result<()> {
 }
 
 /// After the binary inside a `.app` is replaced, stamp the new version and
-/// sign the bundle ad hoc again (as `macos-app` builds it), so its seal
-/// matches the new contents. Best effort, as in torrenter: the binary
-/// itself is already in place and signed.
-fn refresh_installed_app(exe: &Path, tag: &str) {
+/// sign the bundle ad hoc again (as `macos-app` builds it): until then its
+/// seal no longer matches its contents, so a failure is reported.
+fn refresh_installed_app(exe: &Path, tag: &str) -> Result<()> {
     let Some(app) = enclosing_app_bundle(exe) else {
-        return;
+        return Ok(());
     };
-    let _ = stamp_app_bundle(&app, tag);
+    stamp_app_bundle(&app, tag)?;
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("codesign")
+        let status = std::process::Command::new("codesign")
             .args(["--force", "--deep", "-s", "-"])
             .arg(&app)
-            .status();
+            .status()
+            .context("could not run codesign")?;
+        if !status.success() {
+            bail!("codesign failed ({status})");
+        }
     }
+    Ok(())
 }
 
 /// On Linux, `current_exe` of a binary that was renamed over reads
@@ -288,36 +321,36 @@ fn without_linux_deleted_marker(path: &Path) -> PathBuf {
     out
 }
 
-/// Start the installed (new) binary in place of this process. The caller
-/// stops downloads and saves state first: this does not return on success.
+/// Start the installed (new) binary as a new process, then exit this one.
+/// The caller stops downloads and saves state first. Never exec(): the new
+/// image would inherit this window's GL, display and AppKit state (and on
+/// Linux often a `(deleted)` path). A `.app` is opened through Launch
+/// Services (`open -n`) so it gets its own Dock icon and activation.
+/// Returns only on failure.
 pub fn relaunch() -> Result<()> {
     let exe = std::env::current_exe().context("cannot find the running executable")?;
     let exe = without_linux_deleted_marker(&exe);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    // Linux: exec() keeps the old Wayland/X11/GL fds and often targets a
-    // `(deleted)` path after rename-over. Spawn a new process, then exit.
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new(&exe)
-            .args(args)
-            .spawn()
-            .with_context(|| format!("failed to relaunch {}", exe.display()))?;
-        std::process::exit(0);
+    match enclosing_app_bundle(&exe).filter(|_| cfg!(target_os = "macos")) {
+        Some(app) => {
+            let mut open = std::process::Command::new("open");
+            open.arg("-n").arg(&app);
+            if !args.is_empty() {
+                open.arg("--args").args(&args);
+            }
+            let status = open.status().context("could not run open")?;
+            if !status.success() {
+                bail!("could not open {} ({status})", app.display());
+            }
+        }
+        None => {
+            std::process::Command::new(&exe)
+                .args(args)
+                .spawn()
+                .with_context(|| format!("failed to relaunch {}", exe.display()))?;
+        }
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        use std::os::unix::process::CommandExt;
-        let error = std::process::Command::new(&exe).args(args).exec();
-        Err(error).context("failed to relaunch ytd")
-    }
-    #[cfg(not(unix))]
-    {
-        std::process::Command::new(&exe)
-            .args(args)
-            .spawn()
-            .context("failed to relaunch ytd")?;
-        std::process::exit(0);
-    }
+    std::process::exit(0);
 }
 
 fn sibling(exe: &Path, suffix: &str) -> PathBuf {
@@ -346,12 +379,26 @@ fn replace_executable(staged: &Path, exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete the `<exe>.old` a Windows update left behind.
+/// Delete the `<exe>.old` a Windows update left behind. After "restart now"
+/// the old process may still be exiting and its image locked, so a failed
+/// delete is retried in the background for a few seconds.
 pub fn cleanup_replaced_binary() {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(sibling(&exe, ".old"));
-        let _ = std::fs::remove_file(sibling(&exe, ".update"));
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::fs::remove_file(sibling(&exe, ".update"));
+    let old = sibling(&exe, ".old");
+    if !old.exists() || std::fs::remove_file(&old).is_ok() {
+        return;
     }
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if !old.exists() || std::fs::remove_file(&old).is_ok() {
+                return;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -391,6 +438,18 @@ mod tests {
         let xml = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
         assert_eq!(xml.matches("<string>4.1.2</string>").count(), 2);
         assert!(xml.contains("<string>ytd</string>"));
+    }
+
+    /// A bundle that can't be stamped is reported, not skipped: its seal
+    /// would no longer match the new binary. Outside a bundle nothing runs.
+    #[test]
+    fn a_failed_bundle_refresh_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("ytd.app/Contents/MacOS/ytd-gui");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        // No Info.plist.
+        assert!(refresh_installed_app(&exe, "v4.1.2").is_err());
+        assert!(refresh_installed_app(&dir.path().join("ytd-gui"), "v4.1.2").is_ok());
     }
 
     #[test]

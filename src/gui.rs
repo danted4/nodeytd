@@ -32,6 +32,18 @@ const INDETERMINATE_HZ: f32 = 0.4;
 const SLIDER_REPAINT: Duration = Duration::from_millis(16);
 const THUMB: Vec2 = Vec2::new(208.0, 117.0);
 const THUMB_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// "restart now": how long to wait for paused downloads to stop, then for
+/// settings writes to finish (the same limits as quitting).
+const RESTART_JOBS_WAIT: Duration = Duration::from_secs(5);
+const RESTART_SAVES_WAIT: Duration = Duration::from_secs(2);
+
+/// A "restart now" in progress.
+struct Restart {
+    /// Jobs this restart paused, resumed if the relaunch fails.
+    paused: Vec<u64>,
+    jobs_until: Instant,
+}
+
 /// Start of the loader toast while a ytd update downloads.
 const INSTALLING_UPDATE: &str = "installing ytd ";
 /// Toast shown while "update tools" asks GitHub what is out of date.
@@ -483,6 +495,8 @@ enum WorkerEvent {
     UpdatesChecked {
         app: Result<Option<AvailableUpdate>, String>,
         tools: Vec<Tool>,
+        /// This install can replace its own binary (else only announce).
+        can_install: bool,
     },
     AppInstalled(Result<String, String>),
     CookiesTested {
@@ -562,6 +576,7 @@ fn worker_loop(commands: Receiver<WorkerCmd>, events: Sender<WorkerEvent>, ctx: 
                         .map_err(|e| format!("{e:#}")),
                     // A failed tool check is not worth a toast: retried next launch.
                     tools: tools::outdated().await.unwrap_or_default(),
+                    can_install: update::can_self_replace(),
                 },
                 WorkerCmd::CheckTools => WorkerEvent::ToolsChecked(
                     tools::needing_update().await.map_err(|e| format!("{e:#}")),
@@ -795,6 +810,12 @@ pub struct GuiApp {
     tools_checking: bool,
     /// A newer ytd was installed in place: the restart banner shows it.
     installed_tag: Option<String>,
+    /// **later** hides the banner; the update stays installed.
+    banner_hidden: bool,
+    /// An app update is downloading (only one at a time).
+    app_installing: bool,
+    /// **restart now** is pausing downloads and saving before relaunch.
+    restart: Option<Restart>,
     /// Bumped when a tool install finishes or "update tools" gets its
     /// answer; an auto-update result asked for before that is stale.
     tools_generation: u64,
@@ -886,6 +907,9 @@ impl GuiApp {
             tool_rows: None,
             tools_checking: false,
             installed_tag: None,
+            banner_hidden: false,
+            app_installing: false,
+            restart: None,
             tools_generation: 0,
             updates_asked_at: 0,
             glass_tint: initial_glass_tint(cfg.glass_tint),
@@ -1039,11 +1063,32 @@ impl GuiApp {
         &mut self,
         app: Result<Option<AvailableUpdate>, String>,
         stale: Vec<Tool>,
+        can_install: bool,
     ) {
         match app {
+            // Already on disk (VERSION stays old until restart): show the
+            // banner again instead of installing it twice.
+            Ok(Some(available))
+                if self.installed_tag.as_deref() == Some(available.tag.as_str()) =>
+            {
+                self.banner_hidden = false;
+            }
+            Ok(Some(_)) if self.app_installing => {}
+            // A translocated or read-only install can't replace itself.
+            Ok(Some(available)) if !can_install => self.push_toast(
+                format!(
+                    "ytd {} is available: github.com/{}/releases",
+                    available.tag,
+                    update::REPO
+                ),
+                false,
+                Some(Duration::from_secs(15)),
+                None,
+            ),
             // Installed in place, `.app` included (torrenter's flow): a
             // loader toast while it downloads, then the restart banner.
             Ok(Some(available)) => {
+                self.app_installing = true;
                 let snapshot = Arc::new(JobSnapshot::default());
                 snapshot.set_status(progress::STARTING);
                 self.push_toast(
@@ -1251,7 +1296,11 @@ impl GuiApp {
                         }
                     }
                 }
-                WorkerEvent::UpdatesChecked { app, tools } => {
+                WorkerEvent::UpdatesChecked {
+                    app,
+                    tools,
+                    can_install,
+                } => {
                     let asked = self
                         .toasts
                         .iter()
@@ -1261,12 +1310,14 @@ impl GuiApp {
                     if asked && matches!(app, Ok(None)) && tools.is_empty() {
                         self.toast("ytd and its tools are up to date");
                     }
-                    self.on_updates_checked(app, tools);
+                    self.on_updates_checked(app, tools, can_install);
                 }
                 WorkerEvent::AppInstalled(Ok(tag)) => {
+                    self.app_installing = false;
                     self.toasts
                         .retain(|toast| !toast.text.starts_with(INSTALLING_UPDATE));
                     self.installed_tag = Some(tag);
+                    self.banner_hidden = false;
                 }
                 WorkerEvent::CookiesTested { source, result } => {
                     self.cookie_test = None;
@@ -1288,6 +1339,7 @@ impl GuiApp {
                 }
                 WorkerEvent::ConfigSaved(Ok(())) => {}
                 WorkerEvent::AppInstalled(Err(error)) => {
+                    self.app_installing = false;
                     self.toasts
                         .retain(|toast| !toast.text.starts_with(INSTALLING_UPDATE));
                     self.toast_fail(format!(
@@ -1383,6 +1435,10 @@ impl GuiApp {
         let Some(tag) = self.installed_tag.clone() else {
             return;
         };
+        if self.banner_hidden {
+            return;
+        }
+        let restarting = self.restart.is_some();
         let palette = self.palette();
         let fill =
             Color32::from_rgba_unmultiplied(palette.fg.r(), palette.fg.g(), palette.fg.b(), 18);
@@ -1392,32 +1448,76 @@ impl GuiApp {
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    glass_label(
-                        ui,
-                        format!("{tag} is on disk  ·  restart to run it"),
-                        13.0,
-                        palette.fg,
-                    );
+                    let text = if restarting {
+                        format!("restarting into {tag}…")
+                    } else {
+                        format!("{tag} is on disk  ·  restart to run it")
+                    };
+                    glass_label(ui, text, 13.0, palette.fg);
+                    if restarting {
+                        return;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button(RichText::new("later").size(12.0).color(palette.dim))
                             .clicked()
                         {
-                            self.installed_tag = None;
+                            self.banner_hidden = true;
                         }
                         if ui
                             .button(RichText::new("restart now").size(12.0).color(palette.fg))
                             .clicked()
                         {
-                            self.save_for_exit();
-                            if let Err(error) = update::relaunch() {
-                                self.toast_fail(format!("{error:#}"));
-                            }
+                            self.begin_restart();
                         }
                     });
                 });
             });
         ui.add_space(8.0);
+    }
+
+    /// Pause running downloads; [`Self::step_restart`] relaunches once their
+    /// processes ended and the queue is saved. Nothing waits on this thread.
+    fn begin_restart(&mut self) {
+        let mut paused = Vec::new();
+        for job in self.session.jobs() {
+            if job.snapshot.is_active() && !job.snapshot.is_paused() {
+                let _ = self.session.toggle_pause(job.id);
+                paused.push(job.id);
+            }
+        }
+        self.restart = Some(Restart {
+            paused,
+            jobs_until: Instant::now() + RESTART_JOBS_WAIT,
+        });
+    }
+
+    /// One frame of a restart: wait (without blocking) for paused downloads
+    /// to stop and settings to finish saving, then save the queue and
+    /// relaunch. If the relaunch fails, the downloads it paused resume.
+    fn step_restart(&mut self) {
+        let Some(restart) = &self.restart else {
+            return;
+        };
+        let now = Instant::now();
+        if self.session.any_running() && now < restart.jobs_until {
+            return;
+        }
+        if self.pending_saves.load(Ordering::SeqCst) > 0
+            && now < restart.jobs_until + RESTART_SAVES_WAIT
+        {
+            return;
+        }
+        self.session.persist(true);
+        let Some(restart) = self.restart.take() else {
+            return;
+        };
+        if let Err(error) = update::relaunch() {
+            for id in restart.paused {
+                let _ = self.session.toggle_pause(id);
+            }
+            self.toast_fail(format!("could not restart: {error:#} (downloads resumed)"));
+        }
     }
 
     fn tools_banner(&mut self, ui: &mut egui::Ui) {
@@ -2975,6 +3075,7 @@ impl eframe::App for GuiApp {
             self.applied_style = Some(style);
         }
         self.drain_events(ctx);
+        self.step_restart();
         self.session.persist(false);
         // Outdated tools found by auto-update (or by "update tools" during a
         // download): replace them once idle, and not while a check runs.
@@ -3012,11 +3113,11 @@ impl eframe::App for GuiApp {
             )
             .show(ctx, |ui| {
                 ui.add_space(10.0);
+                self.restart_banner(ui);
                 if self.show_settings {
                     self.settings_page(ui);
                     return;
                 }
-                self.restart_banner(ui);
                 self.tools_banner(ui);
                 self.fetch_area(ui);
                 ui.add_space(8.0);
@@ -3025,6 +3126,7 @@ impl eframe::App for GuiApp {
         self.toasts_ui(ctx);
 
         let busy = self.session.any_active()
+            || self.restart.is_some()
             || !self.toasts.is_empty()
             || matches!(self.fetch, Fetch::Loading)
             || matches!(
