@@ -162,7 +162,7 @@ Top bar:
   - **appearance**: colour theme, and on macOS the **window tint** (how strongly the theme colour sits on the frosted window; locked at 100% in fullscreen)
   - **downloads**: downloads at once
   - **YouTube sign-in**: see below
-  - **updates**: auto-update, tool versions, **update tools** and **open tools folder**. **update tools** asks GitHub when you press it and downloads only the tools that are missing or behind their latest release; otherwise it says they are up to date.
+  - **updates**: auto-update, tool versions, **update tools** and **open tools folder**. **update tools** asks GitHub when you press it and downloads only the tools that are missing (a missing ffprobe counts) or behind their latest release; otherwise it says they are up to date. On Windows and Linux, ffmpeg counts as behind once its build is 30 days old, because its publisher releases a new one every day. To repair a tool that is damaged, delete it in **open tools folder** and press **update tools**, or run `ytd tools update --force`.
 
 On macOS the window is frosted glass, as in torrenter. Windows and Linux stay opaque.
 

@@ -1187,13 +1187,24 @@ impl GuiApp {
                     self.tools_checking = false;
                     self.toasts.retain(|toast| toast.text != CHECKING_TOOLS);
                     match result {
-                        Ok(wanted) if wanted.is_empty() => self.toast("tools are up to date"),
-                        // A download started while GitHub answered: a
-                        // running yt-dlp must not be replaced under it.
-                        Ok(_) if self.session.any_running() => {
-                            self.toast_fail("wait for downloads to finish, then update tools")
+                        Ok(wanted) => {
+                            // This check is newer than anything auto-update
+                            // queued while it ran.
+                            self.tool_update_pending.clear();
+                            if wanted.is_empty() {
+                                self.toast("tools are up to date");
+                            } else if matches!(self.tools_state, ToolsState::Installing) {
+                                // Two installs would write the same files.
+                                self.toast("tools are already updating");
+                            } else if self.session.any_running() {
+                                // A download started while GitHub answered:
+                                // a running yt-dlp must not be replaced.
+                                self.tool_update_pending = wanted;
+                                self.toast("tools will update when downloads finish");
+                            } else {
+                                self.setup_tools(Some(wanted));
+                            }
                         }
-                        Ok(wanted) => self.setup_tools(Some(wanted)),
                         Err(error) => {
                             self.toast_fail(format!("could not check for tool updates: {error}"))
                         }
@@ -1926,9 +1937,12 @@ impl GuiApp {
         if update_tools {
             // Only what is missing or behind its latest release gets
             // downloaded; GitHub is asked now, off the GUI thread.
-            self.tools_checking = true;
-            self.push_toast(CHECKING_TOOLS.into(), false, None, None);
-            let _ = self.tx.send(WorkerCmd::CheckTools);
+            if self.tx.send(WorkerCmd::CheckTools).is_ok() {
+                self.tools_checking = true;
+                self.push_toast(CHECKING_TOOLS.into(), false, None, None);
+            } else {
+                self.toast_fail("could not check for tool updates: the worker stopped");
+            }
         }
     }
 
@@ -2902,9 +2916,11 @@ impl eframe::App for GuiApp {
         }
         self.drain_events(ctx);
         self.session.persist(false);
-        // Outdated tools found by auto-update: replace them once idle.
+        // Outdated tools found by auto-update (or by "update tools" during a
+        // download): replace them once idle, and not while a check runs.
         if !self.tool_update_pending.is_empty()
             && matches!(self.tools_state, ToolsState::Ready)
+            && !self.tools_checking
             && !self.session.any_running()
         {
             let stale = std::mem::take(&mut self.tool_update_pending);
