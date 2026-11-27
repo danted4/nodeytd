@@ -791,6 +791,11 @@ pub struct GuiApp {
     tool_rows: Option<Vec<ToolRow>>,
     /// "update tools" is asking GitHub which tools are out of date.
     tools_checking: bool,
+    /// Bumped when a tool install finishes or "update tools" gets its
+    /// answer; an auto-update result asked for before that is stale.
+    tools_generation: u64,
+    /// `tools_generation` when the last auto-update check was sent.
+    updates_asked_at: u64,
     /// macOS window glass (torrenter): saved tint, and what is painted now.
     glass_tint: u8,
     glass_applied: bool,
@@ -876,6 +881,8 @@ impl GuiApp {
             settings_tab: SettingsTab::default(),
             tool_rows: None,
             tools_checking: false,
+            tools_generation: 0,
+            updates_asked_at: 0,
             glass_tint: initial_glass_tint(cfg.glass_tint),
             glass_applied: false,
             glass_attempts: 0,
@@ -1010,6 +1017,7 @@ impl GuiApp {
 
     fn check_updates(&mut self) {
         self.checked_updates = true;
+        self.updates_asked_at = self.tools_generation;
         let _ = self.tx.send(WorkerCmd::CheckUpdates);
     }
 
@@ -1055,7 +1063,12 @@ impl GuiApp {
             Ok(None) => {}
             Err(error) => self.toast_fail(format!("update check failed: {error}")),
         }
-        if !stale.is_empty() {
+        // Drop a tools list that an install or "update tools" made stale
+        // while this check ran, or the same tools would download twice.
+        let current = self.updates_asked_at == self.tools_generation
+            && !self.tools_checking
+            && !matches!(self.tools_state, ToolsState::Installing);
+        if !stale.is_empty() && current {
             self.tool_update_pending = stale;
         }
     }
@@ -1169,6 +1182,7 @@ impl GuiApp {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 WorkerEvent::ToolsDone(result) => {
+                    self.tools_generation += 1;
                     self.tool_rows = None;
                     self.toasts.retain(|toast| toast.progress.is_none());
                     match result {
@@ -1189,7 +1203,8 @@ impl GuiApp {
                     match result {
                         Ok(wanted) => {
                             // This check is newer than anything auto-update
-                            // queued while it ran.
+                            // queued (or will report) from before it.
+                            self.tools_generation += 1;
                             self.tool_update_pending.clear();
                             if wanted.is_empty() {
                                 self.toast("tools are up to date");
