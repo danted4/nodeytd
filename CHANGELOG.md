@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.1.2
+
+- **The macOS app updates itself:** with auto-update on, `ytd.app` now installs a new version in place, as torrenter does: it replaces the binary inside the app, stamps the new version into `Info.plist` and signs the app again. Before, the app only showed "ytd X is available". 4.1.0 and 4.1.1 still only announce it, so install 4.1.2 by hand once.
+- **Update progress and restart banner:** a new version downloads with a progress toast, then a banner reads "vX is on disk · restart to run it" with **restart now** and **later**. **restart now** pauses running downloads (they come back paused), saves, and starts the new version. A failed update says where to download it.
+
 ## 4.1.1
 
 - **update tools only downloads what is out of date:** pressing it now asks GitHub for the latest release of each tool and downloads only the ones that are missing (including a missing ffprobe), behind, or without a recorded version. When everything is current it says "tools are up to date" instead of downloading yt-dlp, ffmpeg and deno again. The check runs only when you press it. On Windows and Linux, ffmpeg counts as behind once its build is 30 days old, as with auto-update, since its publisher releases daily. If a release can't be looked up, that tool is still tried and the others update. `ytd tools update` works the same way; `ytd tools update --force` re-installs everything as before.

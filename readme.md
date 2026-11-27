@@ -102,7 +102,7 @@ If Explorer still blocks the file: right-click it → **Properties** → tick **
    ./ytd-aarch64-apple-darwin
    ```
 
-Inside `ytd.app`, auto-update tells you about a new version instead of installing it: download the new `.app.zip` from the release.
+With auto-update on, `ytd.app` updates itself in place from 4.1.2 on (it replaces its binary, stamps the new version and signs the app again). Versions up to 4.1.1 only announce a new version: install 4.1.2 by hand once.
 
 ## Linux
 
@@ -157,7 +157,7 @@ Queue:
 Top bar:
 
 - A tick means the tools are ready.
-- **auto-update** (off by default) keeps ytd and its tools current from GitHub Releases. App updates take effect the next time you start ytd. On macOS a new version is announced instead of installed.
+- **auto-update** (off by default) keeps ytd and its tools current from GitHub Releases. A new version downloads with a progress toast, then a banner offers **restart now** (running downloads are paused and come back paused) or **later** (it runs from the next start).
 - The cog opens the settings page; the title goes back to the downloads. Settings has four tabs:
   - **appearance**: colour theme, and on macOS the **window tint** (how strongly the theme colour sits on the frosted window; locked at 100% in fullscreen)
   - **downloads**: downloads at once

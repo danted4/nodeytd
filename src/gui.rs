@@ -32,6 +32,8 @@ const INDETERMINATE_HZ: f32 = 0.4;
 const SLIDER_REPAINT: Duration = Duration::from_millis(16);
 const THUMB: Vec2 = Vec2::new(208.0, 117.0);
 const THUMB_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Start of the loader toast while a ytd update downloads.
+const INSTALLING_UPDATE: &str = "installing ytd ";
 /// Toast shown while "update tools" asks GitHub what is out of date.
 const CHECKING_TOOLS: &str = "checking tools…";
 /// Header rows, as in torrenter: the URL box and the download-folder row.
@@ -791,6 +793,8 @@ pub struct GuiApp {
     tool_rows: Option<Vec<ToolRow>>,
     /// "update tools" is asking GitHub which tools are out of date.
     tools_checking: bool,
+    /// A newer ytd was installed in place: the restart banner shows it.
+    installed_tag: Option<String>,
     /// Bumped when a tool install finishes or "update tools" gets its
     /// answer; an auto-update result asked for before that is stale.
     tools_generation: u64,
@@ -881,6 +885,7 @@ impl GuiApp {
             settings_tab: SettingsTab::default(),
             tool_rows: None,
             tools_checking: false,
+            installed_tag: None,
             tools_generation: 0,
             updates_asked_at: 0,
             glass_tint: initial_glass_tint(cfg.glass_tint),
@@ -1036,11 +1041,13 @@ impl GuiApp {
         stale: Vec<Tool>,
     ) {
         match app {
-            Ok(Some(available)) if update::can_self_replace() => {
+            // Installed in place, `.app` included (torrenter's flow): a
+            // loader toast while it downloads, then the restart banner.
+            Ok(Some(available)) => {
                 let snapshot = Arc::new(JobSnapshot::default());
                 snapshot.set_status(progress::STARTING);
                 self.push_toast(
-                    format!("installing ytd {}…", available.tag),
+                    format!("{INSTALLING_UPDATE}{}…", available.tag),
                     false,
                     None,
                     Some(Arc::clone(&snapshot)),
@@ -1050,16 +1057,6 @@ impl GuiApp {
                     snapshot,
                 });
             }
-            Ok(Some(available)) => self.push_toast(
-                format!(
-                    "ytd {} is available: github.com/{}/releases",
-                    available.tag,
-                    update::REPO
-                ),
-                false,
-                Some(Duration::from_secs(15)),
-                None,
-            ),
             Ok(None) => {}
             Err(error) => self.toast_fail(format!("update check failed: {error}")),
         }
@@ -1266,12 +1263,11 @@ impl GuiApp {
                     }
                     self.on_updates_checked(app, tools);
                 }
-                WorkerEvent::AppInstalled(Ok(tag)) => self.push_toast(
-                    format!("ytd {tag} installed: restart ytd to use it"),
-                    false,
-                    Some(Duration::from_secs(30)),
-                    None,
-                ),
+                WorkerEvent::AppInstalled(Ok(tag)) => {
+                    self.toasts
+                        .retain(|toast| !toast.text.starts_with(INSTALLING_UPDATE));
+                    self.installed_tag = Some(tag);
+                }
                 WorkerEvent::CookiesTested { source, result } => {
                     self.cookie_test = None;
                     match result {
@@ -1292,7 +1288,12 @@ impl GuiApp {
                 }
                 WorkerEvent::ConfigSaved(Ok(())) => {}
                 WorkerEvent::AppInstalled(Err(error)) => {
-                    self.toast_fail(format!("update failed: {error}"))
+                    self.toasts
+                        .retain(|toast| !toast.text.starts_with(INSTALLING_UPDATE));
+                    self.toast_fail(format!(
+                        "update failed: {error} (get it from github.com/{}/releases)",
+                        update::REPO
+                    ));
                 }
                 // A newer fetch replaced this one.
                 WorkerEvent::Info { .. } | WorkerEvent::Thumb { .. } => {}
@@ -1373,6 +1374,50 @@ impl GuiApp {
                 }
             });
         });
+    }
+
+    /// torrenter's banner after an in-place update: the new binary is on
+    /// disk and runs from the next start. **restart now** pauses downloads
+    /// (they come back paused), saves, and starts the new version.
+    fn restart_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(tag) = self.installed_tag.clone() else {
+            return;
+        };
+        let palette = self.palette();
+        let fill =
+            Color32::from_rgba_unmultiplied(palette.fg.r(), palette.fg.g(), palette.fg.b(), 18);
+        egui::Frame::NONE
+            .fill(fill)
+            .stroke(Stroke::new(1.0_f32, palette.dim))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    glass_label(
+                        ui,
+                        format!("{tag} is on disk  ·  restart to run it"),
+                        13.0,
+                        palette.fg,
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(RichText::new("later").size(12.0).color(palette.dim))
+                            .clicked()
+                        {
+                            self.installed_tag = None;
+                        }
+                        if ui
+                            .button(RichText::new("restart now").size(12.0).color(palette.fg))
+                            .clicked()
+                        {
+                            self.save_for_exit();
+                            if let Err(error) = update::relaunch() {
+                                self.toast_fail(format!("{error:#}"));
+                            }
+                        }
+                    });
+                });
+            });
+        ui.add_space(8.0);
     }
 
     fn tools_banner(&mut self, ui: &mut egui::Ui) {
@@ -2971,6 +3016,7 @@ impl eframe::App for GuiApp {
                     self.settings_page(ui);
                     return;
                 }
+                self.restart_banner(ui);
                 self.tools_banner(ui);
                 self.fetch_area(ui);
                 ui.add_space(8.0);
@@ -2993,9 +3039,15 @@ impl eframe::App for GuiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Pause running jobs and wait for their yt-dlp/ffmpeg trees to end,
-        // so nothing keeps writing after the window is gone. They come back
-        // paused next time.
+        self.save_for_exit();
+    }
+}
+
+impl GuiApp {
+    /// Before quitting or relaunching: pause running jobs and wait for
+    /// their yt-dlp/ffmpeg trees to end, so nothing keeps writing after the
+    /// window is gone. They come back paused next time.
+    fn save_for_exit(&mut self) {
         self.session.shutdown(Duration::from_secs(5));
         self.session.persist(true);
         // A setting picked just before quitting is still being written.
