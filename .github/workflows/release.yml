@@ -93,6 +93,12 @@ jobs:
     needs: [verify-tag-on-main, build]
     runs-on: ubuntu-latest
     steps:
+      # Only CHANGELOG.md, for the release body. Checked out first, because
+      # checkout empties the workspace.
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v7
         with:
           path: dist
@@ -102,9 +108,18 @@ jobs:
           cd dist
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
+      # The tag's CHANGELOG.md section opens the release body, above
+      # GitHub's generated list of PRs.
+      - name: release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v head="## $version" '$0 == head { on = 1; next } /^## / { if (on) exit } on' CHANGELOG.md > release-notes.md
+          grep -q '[^[:space:]]' release-notes.md || { echo "CHANGELOG.md has no '## $version' section" >&2; exit 1; }
+          cat release-notes.md
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          body_path: release-notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true
         env:

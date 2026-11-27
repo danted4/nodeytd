@@ -29,7 +29,7 @@ pub mod icon;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The signature shown in the GUI header, the window title and at the start
-/// of the CLI: `danted4/rustYTD v4.0.1`, as in torrenter.
+/// of the CLI: `danted4/ytd v4.1.0`, as in torrenter.
 pub fn banner() -> String {
     format!("{} v{VERSION}", update::REPO)
 }
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn banner_is_repo_then_version() {
         let text = super::banner();
-        assert!(text.starts_with("danted4/rustYTD v"), "{text}");
+        assert!(text.starts_with("danted4/ytd v"), "{text}");
         assert!(text.ends_with(super::VERSION), "{text}");
     }
 }

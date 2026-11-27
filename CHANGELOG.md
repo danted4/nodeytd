@@ -2,6 +2,10 @@
 
 ## 4.1.0
 
+- **Update 4.0.x by hand once:** 4.0.0 and 4.0.1 find this release through GitHub's redirect but refuse to install it, because its download links name the new repository, so their auto-update fails. Download 4.1.0 from the [release page](https://github.com/danted4/ytd/releases/latest) once; updates work again from 4.1.0 on.
+- **New name: ytd.** The repository is now `danted4/ytd` (renamed from `rustYTD`), and the header, window title and CLI show `danted4/ytd v4.1.0`. The binaries, `ytd.app` and the settings folder were already called ytd.
+- **New default download folder:** `Downloads/ytd` instead of `Downloads/rustYTD` (`Downloads/ytd-downloads` if a file named `ytd`, such as the CLI, is already there). A folder you chose yourself is kept; downloads paused in 4.0.x resume in their old folder. A download folder that is a file now fails with a clear message.
+- **New icon:** a "Y" sitting in the download tray, in torrenter's shape and ytd's coral colours.
 - **Download folder on the main page:** the folder sits under the link box, as in torrenter. Click it to choose another one.
 - **Link box:** it has a border that lights up on hover and focus, and a **×** that clears it. The × or Esc starts over, also while a preview is loading. **dismiss** now clears the link too.
 - **Queue search:** filter downloads by title, link, folder, type, date or status.

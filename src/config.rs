@@ -6,7 +6,7 @@
 //! overrides it (tests use this).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -40,13 +40,26 @@ pub fn tools_dir() -> PathBuf {
     config_dir().join("tools")
 }
 
-/// `<Downloads>/rustYTD`: `%USERPROFILE%\Downloads` on Windows, `~/Downloads`
+/// `<Downloads>/ytd`: `%USERPROFILE%\Downloads` on Windows, `~/Downloads`
 /// on macOS, the XDG download dir on Linux (home as the fallback).
 pub fn default_download_dir() -> PathBuf {
-    dirs::download_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("rustYTD")
+    default_dir_in(
+        &dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    )
+}
+
+/// `<base>/ytd`, or `<base>/ytd-downloads` when something that is not a
+/// folder already has that name: the CLI binary saved into Downloads as
+/// `ytd` would otherwise make every download fail.
+fn default_dir_in(base: &Path) -> PathBuf {
+    let dir = base.join("ytd");
+    if dir.exists() && !dir.is_dir() {
+        base.join("ytd-downloads")
+    } else {
+        dir
+    }
 }
 
 /// One installed tool: where it is and which release it came from.
@@ -269,6 +282,24 @@ mod tests {
         assert_eq!(windows_glass_tint(0), GLASS_TINT_MAX);
         assert_eq!(windows_glass_tint(GLASS_TINT_DEFAULT), GLASS_TINT_MAX);
         assert_eq!(glass_tint_percent(windows_glass_tint(90)), 100);
+    }
+
+    #[test]
+    fn default_download_folder_is_named_ytd() {
+        let base = tempfile::tempdir().unwrap();
+        assert_eq!(default_dir_in(base.path()), base.path().join("ytd"));
+        std::fs::create_dir(base.path().join("ytd")).unwrap();
+        assert_eq!(default_dir_in(base.path()), base.path().join("ytd"));
+    }
+
+    #[test]
+    fn default_download_folder_avoids_a_file_named_ytd() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::write(base.path().join("ytd"), b"binary").unwrap();
+        assert_eq!(
+            default_dir_in(base.path()),
+            base.path().join("ytd-downloads")
+        );
     }
 
     #[test]
