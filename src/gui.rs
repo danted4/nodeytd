@@ -1479,23 +1479,35 @@ impl GuiApp {
     /// Pause running downloads; [`Self::step_restart`] relaunches once their
     /// processes ended and the queue is saved. Nothing waits on this thread.
     fn begin_restart(&mut self) {
-        let mut paused = Vec::new();
+        self.restart = Some(Restart {
+            paused: Vec::new(),
+            jobs_until: Instant::now() + RESTART_JOBS_WAIT,
+        });
+        self.pause_for_restart();
+    }
+
+    /// Pause every active job not paused yet, remembering it so a failed
+    /// relaunch can resume it. Runs every restart frame: a download queued
+    /// or resumed meanwhile must not be left running when the process exits.
+    fn pause_for_restart(&mut self) {
+        let Some(restart) = self.restart.as_mut() else {
+            return;
+        };
         for job in self.session.jobs() {
             if job.snapshot.is_active() && !job.snapshot.is_paused() {
                 let _ = self.session.toggle_pause(job.id);
-                paused.push(job.id);
+                if !restart.paused.contains(&job.id) {
+                    restart.paused.push(job.id);
+                }
             }
         }
-        self.restart = Some(Restart {
-            paused,
-            jobs_until: Instant::now() + RESTART_JOBS_WAIT,
-        });
     }
 
     /// One frame of a restart: wait (without blocking) for paused downloads
     /// to stop and settings to finish saving, then save the queue and
     /// relaunch. If the relaunch fails, the downloads it paused resume.
     fn step_restart(&mut self) {
+        self.pause_for_restart();
         let Some(restart) = &self.restart else {
             return;
         };
