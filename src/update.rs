@@ -4,8 +4,11 @@
 //! release's `SHA256SUMS`, and the size is capped.
 //!
 //! The running executable is replaced in place; the new version runs from
-//! the next launch. On Windows the running exe cannot be overwritten, so it
-//! is renamed to `<exe>.old` first and deleted on the next start.
+//! the next launch (or [`relaunch`]). On Windows the running exe cannot be
+//! overwritten, so it is renamed to `<exe>.old` first and deleted on the
+//! next start. Inside a macOS `.app` the binary in `Contents/MacOS` is
+//! replaced too, then the bundle's version is stamped and the bundle is
+//! ad-hoc signed again, as torrenter does.
 
 use std::path::{Path, PathBuf};
 
@@ -52,15 +55,6 @@ pub fn asset_name(kind: AppKind) -> Option<String> {
     };
     let ext = if cfg!(windows) { ".exe" } else { "" };
     target_triple().map(|target| format!("{stem}-{target}{ext}"))
-}
-
-/// Inside a macOS `.app` the bundle is signed as a whole: replacing the
-/// binary would break it, so there the update is only announced.
-pub fn can_self_replace() -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    !exe.to_string_lossy().contains(".app/Contents/MacOS/")
 }
 
 fn parse_version(raw: &str) -> Option<(u64, u64, u64)> {
@@ -158,8 +152,205 @@ async fn install_to(
     .await;
     if result.is_err() {
         let _ = std::fs::remove_file(&staged);
+        return result;
     }
-    result
+    refresh_installed_app(exe, &update.tag).with_context(|| {
+        format!(
+            "ytd {} is installed, but ytd.app could not be signed again; if it does not open, \
+             download the .app.zip from github.com/{REPO}/releases",
+            update.tag
+        )
+    })
+}
+
+/// Whether this install can replace its own binary: not a quarantined
+/// `.app` that macOS runs from a read-only translocated copy, and its
+/// folder is writable (a non-admin user, a read-only volume or a system
+/// folder is not). When it can't, a new version is only announced.
+pub fn can_self_replace() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
+        return false;
+    }
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let probe = dir.join(format!(".ytd-write-test-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// `ytd.app`'s `Info.plist`: written by `macos-app` at release time and
+/// re-stamped by the updater.
+pub fn app_info_plist(version: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>ytd</string>
+	<key>CFBundleExecutable</key>
+	<string>ytd-gui</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.danted4.ytd</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ytd</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{version}</string>
+	<key>CFBundleVersion</key>
+	<string>{version}</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+/// `/Applications/ytd.app` for `/Applications/ytd.app/Contents/MacOS/ytd-gui`.
+fn enclosing_app_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    if macos.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    app.file_name()?
+        .to_str()?
+        .ends_with(".app")
+        .then(|| app.to_path_buf())
+}
+
+fn version_from_tag(tag: &str) -> &str {
+    tag.strip_prefix('v').unwrap_or(tag)
+}
+
+fn replace_plist_string(xml: &str, key: &str, value: &str) -> Result<String> {
+    let header = format!("<key>{key}</key>");
+    let Some(key_at) = xml.find(&header) else {
+        bail!("Info.plist has no {key}");
+    };
+    let after_key = key_at + header.len();
+    let rest = &xml[after_key..];
+    let Some(string_at) = rest.find("<string>") else {
+        bail!("Info.plist {key} has no string value");
+    };
+    if string_at > 80 {
+        bail!("Info.plist {key} is not followed by a string");
+    }
+    let value_at = after_key + string_at + "<string>".len();
+    let Some(end) = xml[value_at..].find("</string>") else {
+        bail!("Info.plist {key} string is unclosed");
+    };
+    Ok(format!(
+        "{}{value}{}",
+        &xml[..value_at],
+        &xml[value_at + end..]
+    ))
+}
+
+/// Finder's "version" for the bundle follows the binary that was put in.
+fn stamp_app_bundle(app: &Path, tag: &str) -> Result<()> {
+    let version = version_from_tag(tag);
+    let plist_path = app.join("Contents/Info.plist");
+    let xml = std::fs::read_to_string(&plist_path)
+        .with_context(|| format!("read {}", plist_path.display()))?;
+    let xml = replace_plist_string(&xml, "CFBundleShortVersionString", version)?;
+    let xml = replace_plist_string(&xml, "CFBundleVersion", version)?;
+    std::fs::write(&plist_path, xml).with_context(|| format!("write {}", plist_path.display()))?;
+    Ok(())
+}
+
+/// After the binary inside a `.app` is replaced, stamp the new version and
+/// sign the bundle ad hoc again (as `macos-app` builds it): until then its
+/// seal no longer matches its contents, so a failure is reported.
+fn refresh_installed_app(exe: &Path, tag: &str) -> Result<()> {
+    let Some(app) = enclosing_app_bundle(exe) else {
+        return Ok(());
+    };
+    stamp_app_bundle(&app, tag)?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("codesign")
+            .args(["--force", "--deep", "-s", "-"])
+            .arg(&app)
+            .status()
+            .context("could not run codesign")?;
+        if !status.success() {
+            bail!("codesign failed ({status})");
+        }
+    }
+    Ok(())
+}
+
+/// On Linux, `current_exe` of a binary that was renamed over reads
+/// `/path/ytd-gui (deleted)`.
+fn without_linux_deleted_marker(path: &Path) -> PathBuf {
+    const MARKER: &str = " (deleted)";
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.to_path_buf();
+    };
+    let Some(stripped) = name.strip_suffix(MARKER) else {
+        return path.to_path_buf();
+    };
+    let mut out = path.to_path_buf();
+    out.set_file_name(stripped);
+    out
+}
+
+/// Start the installed (new) binary as a new process, then exit this one.
+/// The caller stops downloads and saves state first. Never exec(): the new
+/// image would inherit this window's GL, display and AppKit state (and on
+/// Linux often a `(deleted)` path). A `.app` is opened through Launch
+/// Services (`open -n`) so it gets its own Dock icon and activation.
+/// Returns only on failure.
+pub fn relaunch() -> Result<()> {
+    let exe = std::env::current_exe().context("cannot find the running executable")?;
+    let exe = without_linux_deleted_marker(&exe);
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match enclosing_app_bundle(&exe).filter(|_| cfg!(target_os = "macos")) {
+        Some(app) => {
+            let mut open = std::process::Command::new("open");
+            open.arg("-n").arg(&app);
+            if !args.is_empty() {
+                open.arg("--args").args(&args);
+            }
+            let status = open.status().context("could not run open")?;
+            if !status.success() {
+                bail!("could not open {} ({status})", app.display());
+            }
+        }
+        None => {
+            std::process::Command::new(&exe)
+                .args(args)
+                .spawn()
+                .with_context(|| format!("failed to relaunch {}", exe.display()))?;
+        }
+    }
+    std::process::exit(0);
 }
 
 fn sibling(exe: &Path, suffix: &str) -> PathBuf {
@@ -188,16 +379,91 @@ fn replace_executable(staged: &Path, exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete the `<exe>.old` a Windows update left behind.
+/// Delete the `<exe>.old` a Windows update left behind. After "restart now"
+/// the old process may still be exiting and its image locked, so a failed
+/// delete is retried in the background for a few seconds.
 pub fn cleanup_replaced_binary() {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(sibling(&exe, ".old"));
-        let _ = std::fs::remove_file(sibling(&exe, ".update"));
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::fs::remove_file(sibling(&exe, ".update"));
+    let old = sibling(&exe, ".old");
+    if !old.exists() || std::fs::remove_file(&old).is_ok() {
+        return;
     }
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if !old.exists() || std::fs::remove_file(&old).is_ok() {
+                return;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn app_bundle_is_the_shell_around_macos_binary() {
+        let exe = PathBuf::from("/Applications/ytd.app/Contents/MacOS/ytd-gui");
+        assert_eq!(
+            enclosing_app_bundle(&exe).as_deref(),
+            Some(Path::new("/Applications/ytd.app"))
+        );
+        assert!(enclosing_app_bundle(Path::new("/tmp/ytd-gui")).is_none());
+        assert!(enclosing_app_bundle(Path::new("/opt/ytd/Contents/MacOS/ytd-gui")).is_none());
+    }
+
+    #[test]
+    fn plist_version_strings_are_replaced() {
+        let xml = r#"<key>CFBundleShortVersionString</key>
+	<string>4.1.1</string>
+	<key>CFBundleVersion</key>
+	<string>4.1.1</string>"#;
+        let xml = replace_plist_string(xml, "CFBundleShortVersionString", "4.1.2").unwrap();
+        let xml = replace_plist_string(&xml, "CFBundleVersion", "4.1.2").unwrap();
+        assert!(xml.contains("<string>4.1.2</string>"));
+        assert!(!xml.contains("4.1.1"));
+        assert_eq!(version_from_tag("v4.1.2"), "4.1.2");
+        assert!(replace_plist_string(&xml, "CFBundleName", "x").is_err());
+    }
+
+    #[test]
+    fn stamping_writes_the_bundle_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("ytd.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), app_info_plist("4.1.1")).unwrap();
+        stamp_app_bundle(&app, "v4.1.2").unwrap();
+        let xml = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
+        assert_eq!(xml.matches("<string>4.1.2</string>").count(), 2);
+        assert!(xml.contains("<string>ytd</string>"));
+    }
+
+    /// A bundle that can't be stamped is reported, not skipped: its seal
+    /// would no longer match the new binary. Outside a bundle nothing runs.
+    #[test]
+    fn a_failed_bundle_refresh_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("ytd.app/Contents/MacOS/ytd-gui");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        // No Info.plist.
+        assert!(refresh_installed_app(&exe, "v4.1.2").is_err());
+        assert!(refresh_installed_app(&dir.path().join("ytd-gui"), "v4.1.2").is_ok());
+    }
+
+    #[test]
+    fn linux_deleted_marker_is_dropped() {
+        assert_eq!(
+            without_linux_deleted_marker(Path::new("/opt/ytd/ytd-gui (deleted)")),
+            PathBuf::from("/opt/ytd/ytd-gui")
+        );
+        assert_eq!(
+            without_linux_deleted_marker(Path::new("/opt/ytd/ytd-gui")),
+            PathBuf::from("/opt/ytd/ytd-gui")
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -4763,7 +4763,7 @@ dependencies = [
 
 [[package]]
 name = "ytd"
-version = "4.1.1"
+version = "4.1.2"
 dependencies = [
  "anyhow",
  "chrono",

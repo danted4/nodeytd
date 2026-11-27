@@ -93,7 +93,10 @@ fn pack_in(work: &Path, gui: &Path, version: &str, out_zip: &Path) -> Result<()>
     }
     fs::copy(&icns, resources.join("AppIcon.icns"))?;
     fs::write(app.join("Contents/PkgInfo"), b"APPL????")?;
-    fs::write(app.join("Contents/Info.plist"), info_plist(version))?;
+    fs::write(
+        app.join("Contents/Info.plist"),
+        ytd::update::app_info_plist(version),
+    )?;
 
     let _ = Command::new("xattr").args(["-cr"]).arg(&app).status();
     run(Command::new("codesign")
@@ -138,44 +141,6 @@ fn abs_out(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
-}
-
-fn info_plist(version: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>en</string>
-	<key>CFBundleDisplayName</key>
-	<string>ytd</string>
-	<key>CFBundleExecutable</key>
-	<string>ytd-gui</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.danted4.ytd</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>ytd</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>{version}</string>
-	<key>CFBundleVersion</key>
-	<string>{version}</string>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.utilities</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-</dict>
-</plist>
-"#
-    )
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
