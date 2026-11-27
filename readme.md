@@ -206,7 +206,7 @@ Ctrl-C cancels a download and removes its partial files.
 
 ## Where things go
 
-- **Downloads:** `Downloads/ytd` (change it with the folder under the link box).
+- **Downloads:** `Downloads/ytd`, or `Downloads/ytd-downloads` when a file named `ytd` (such as the CLI) is already there. Change it with the folder under the link box, or `--dir` in the CLI.
 - **Unfinished downloads:** each one keeps its partial files in its own folder under `.ytd-parts` inside the download folder. Stop or remove deletes that folder only; finished files are never touched.
 - **Settings, job list and tools:**
   - Windows: `%APPDATA%\ytd`

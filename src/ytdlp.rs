@@ -448,6 +448,15 @@ pub async fn download(
     request: &DownloadRequest,
     progress: &ProgressHandle,
 ) -> Result<PathBuf> {
+    if tokio::fs::metadata(&request.dir)
+        .await
+        .is_ok_and(|meta| !meta.is_dir())
+    {
+        bail!(
+            "{} is a file, not a folder: choose another download folder (CLI: --dir)",
+            request.dir.display()
+        );
+    }
     tokio::fs::create_dir_all(&request.dir)
         .await
         .with_context(|| format!("failed to create {}", request.dir.display()))?;
@@ -703,6 +712,38 @@ mod tests {
     /// A fake yt-dlp that floods stderr with more than a pipe buffer of
     /// bytes that are not UTF-8, reports a merge there, and then the file.
     /// The download must drain it all and finish (it used to hang).
+    #[tokio::test]
+    async fn a_file_as_the_folder_gets_a_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ytd");
+        std::fs::write(&file, b"binary").unwrap();
+        let tools = ToolPaths {
+            ytdlp: dir.path().join("yt-dlp"),
+            ffmpeg: dir.path().join("ffmpeg"),
+            deno: None,
+            cookies: None,
+        };
+        let request = DownloadRequest {
+            url: "https://example.com/v".into(),
+            title: "clip".into(),
+            kind: DownloadKind::Merged,
+            video_format: None,
+            audio_format: None,
+            name: "clip".into(),
+            dir: file.clone(),
+            trim_start: None,
+            trim_end: None,
+            expected_size: 0,
+        };
+        let err = download(&tools, &request, &ProgressHandle::Hidden)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&file.display().to_string()), "{err}");
+        assert!(err.contains("is a file, not a folder"), "{err}");
+        assert!(err.contains("--dir"), "{err}");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn non_utf8_stderr_does_not_hang_and_merging_shows() {
