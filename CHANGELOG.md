@@ -1,5 +1,9 @@
 # Changelog
 
+## 4.1.1
+
+- **update tools only downloads what is out of date:** pressing it now asks GitHub for the latest release of each tool and downloads only the ones that are missing (including a missing ffprobe), behind, or without a recorded version. When everything is current it says "tools are up to date" instead of downloading yt-dlp, ffmpeg and deno again. The check runs only when you press it. On Windows and Linux, ffmpeg counts as behind once its build is 30 days old, as with auto-update, since its publisher releases daily. If a release can't be looked up, that tool is still tried and the others update. `ytd tools update` works the same way; `ytd tools update --force` re-installs everything as before.
+
 ## 4.1.0
 
 - **Update 4.0.x by hand once:** 4.0.0 and 4.0.1 find this release through GitHub's redirect but refuse to install it, because its download links name the new repository, so their auto-update fails. Download 4.1.0 from the [release page](https://github.com/danted4/ytd/releases/latest) once; updates work again from 4.1.0 on.

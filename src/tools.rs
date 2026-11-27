@@ -328,6 +328,44 @@ pub async fn outdated() -> Result<Vec<Tool>> {
     Ok(stale)
 }
 
+/// What "update tools" installs, checked when it is pressed: tools ytd
+/// manages that are missing (any file of the install, such as ffprobe),
+/// have no recorded version (nothing to compare with), or are stale by
+/// [`is_stale`]. Empty means everything is up to date.
+///
+/// A tool whose release lookup fails is listed too: its install reports
+/// the error, and the other tools still update.
+pub async fn needing_update() -> Result<Vec<Tool>> {
+    needing_update_with(&http_client()?, &Github::default()).await
+}
+
+async fn needing_update_with(client: &reqwest::Client, github: &Github) -> Result<Vec<Tool>> {
+    let config = config::load_config();
+    let dir = config::tools_dir();
+    let mut wanted = Vec::new();
+    for tool in managed() {
+        let record = config.tools.get(tool.key());
+        let needed = match (record, plan(tool)) {
+            // managed() only lists a tool that is found when it is in our
+            // folder, so all of its files must be there.
+            (Some(record), Some(plan))
+                if locate(tool).is_some()
+                    && plan.members.iter().all(|member| dir.join(member).is_file()) =>
+            {
+                match latest_release(client, github, plan.repo).await {
+                    Ok(release) => is_stale(tool, &record.version, &release.version()),
+                    Err(_) => true,
+                }
+            }
+            _ => true,
+        };
+        if needed {
+            wanted.push(tool);
+        }
+    }
+    Ok(wanted)
+}
+
 /// FFmpeg-Builds (Windows, Linux) republishes every day under a rolling tag
 /// (its "version" is the publish date): only a build a month newer is worth
 /// the ~200 MB download. ytd's macOS ffmpeg is tagged `<version>-<build>`
@@ -475,7 +513,8 @@ pub fn managed() -> Vec<Tool> {
 }
 
 /// Re-install every tool ytd manages (those in our `tools/` folder, plus any
-/// that are missing). Tools found on PATH are the user's to update.
+/// that are missing), whatever their version: `ytd tools update --force`.
+/// Tools found on PATH are the user's to update.
 pub async fn update_all(progress_for: impl Fn(Tool) -> ProgressHandle) -> Result<ToolPaths> {
     update_tools(&managed(), progress_for).await
 }
@@ -1145,6 +1184,109 @@ mod tests {
             b"ffprobe-bytes"
         );
         assert!(!dir.path().join("readme.txt").exists());
+    }
+
+    /// "update tools" asks GitHub first: a tool at the latest release is
+    /// skipped; one behind it, or with no recorded version, is installed.
+    #[tokio::test]
+    async fn update_tools_skips_tools_at_the_latest_release() {
+        let _env = crate::config::test_env::temp_config();
+        // All three in ytd's own folder, so PATH on the test machine does
+        // not matter.
+        let dir = config::tools_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in Tool::ALL {
+            std::fs::write(dir.join(tool.exe_name()), b"bin").unwrap();
+        }
+        let record = |version: &str| ToolRecord {
+            version: version.into(),
+            installed_at: "2026-11-27".into(),
+        };
+        config::edit_config(|cfg| {
+            cfg.tools.insert(Tool::YtDlp.key().into(), record("v2"));
+            cfg.tools.insert(Tool::Ffmpeg.key().into(), record("v1"));
+        })
+        .unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let base = format!("http://127.0.0.1:{port}");
+        let routes = Tool::ALL
+            .into_iter()
+            .map(|tool| {
+                let repo = plan(tool).unwrap().repo;
+                (
+                    format!("/repos/{repo}/releases/latest"),
+                    release_json(&base, repo, "v2", &[]),
+                )
+            })
+            .collect();
+        serve_on(port, routes).await;
+        let github = Github {
+            api: base.clone(),
+            web: base,
+        };
+
+        let wanted = needing_update_with(&http_client().unwrap(), &github)
+            .await
+            .unwrap();
+        // yt-dlp is at v2; ffmpeg is behind; deno has no recorded version.
+        assert_eq!(wanted, vec![Tool::Ffmpeg, Tool::Deno]);
+    }
+
+    /// A missing ffprobe re-installs ffmpeg even at the latest release, and
+    /// a failed release lookup (yt-dlp: 404) lists that tool instead of
+    /// cancelling the others.
+    #[tokio::test]
+    async fn update_tools_repairs_missing_files_and_survives_a_failed_lookup() {
+        let _env = crate::config::test_env::temp_config();
+        let dir = config::tools_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in Tool::ALL {
+            for member in plan(tool).unwrap().members {
+                std::fs::write(dir.join(member), b"bin").unwrap();
+            }
+        }
+        std::fs::remove_file(dir.join(exe_for(std::env::consts::OS, "ffprobe"))).unwrap();
+        config::edit_config(|cfg| {
+            for tool in Tool::ALL {
+                cfg.tools.insert(
+                    tool.key().into(),
+                    ToolRecord {
+                        version: "v2".into(),
+                        installed_at: "2026-11-27".into(),
+                    },
+                );
+            }
+        })
+        .unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let base = format!("http://127.0.0.1:{port}");
+        // No route for yt-dlp's repo: its lookup gets a 404.
+        let routes = [Tool::Ffmpeg, Tool::Deno]
+            .into_iter()
+            .map(|tool| {
+                let repo = plan(tool).unwrap().repo;
+                (
+                    format!("/repos/{repo}/releases/latest"),
+                    release_json(&base, repo, "v2", &[]),
+                )
+            })
+            .collect();
+        serve_on(port, routes).await;
+        let github = Github {
+            api: base.clone(),
+            web: base,
+        };
+
+        let wanted = needing_update_with(&http_client().unwrap(), &github)
+            .await
+            .unwrap();
+        assert_eq!(wanted, vec![Tool::YtDlp, Tool::Ffmpeg]);
     }
 
     /// Start a server whose `/repos/<repo>/releases/latest` names its own URLs.
