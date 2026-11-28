@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.1.3
 
 - **× in the link box:** it sits 8 px inside the box's right edge, like torrenter's file icon, instead of about 32 px in.
 
