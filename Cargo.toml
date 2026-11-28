@@ -1,6 +1,6 @@
 [package]
 name = "ytd"
-version = "4.1.2"
+version = "4.1.3"
 edition = "2021"
 description = "Desktop video downloader (GUI and CLI) built on yt-dlp and ffmpeg, with a download queue and auto-installed tools."
 license = "ISC"
