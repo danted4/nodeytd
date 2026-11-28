@@ -1585,17 +1585,19 @@ impl GuiApp {
                         RichText::new("paste a video link and press Enter").color(palette.dim),
                     );
                 }
-                let field = ui
-                    .allocate_ui_with_layout(
-                        egui::vec2(field_w, URL_H),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            bordered_field(ui, palette);
-                            ui.add(edit)
-                        },
-                    )
-                    .inner;
-                if !self.url.is_empty() && clear_glyph(ui, palette, field.rect).clicked() {
+                let boxed = ui.allocate_ui_with_layout(
+                    egui::vec2(field_w, URL_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        bordered_field(ui, palette);
+                        ui.add(edit)
+                    },
+                );
+                let field = boxed.inner;
+                // The box's rect, as torrenter's file glyph uses: the
+                // TextEdit's own response rect leaves out its margins, so
+                // a glyph placed from it sits 24 px short of the border.
+                if !self.url.is_empty() && clear_glyph(ui, palette, boxed.response.rect).clicked() {
                     clear = true;
                 }
                 // egui drops focus on Esc, so look at both.
@@ -2810,7 +2812,8 @@ fn click_text(
     click_cursor(glass_text(ui, text, size, color, Sense::click()))
 }
 
-/// Inside the URL box, at its right end: clear it.
+/// Inside the URL box, at its right end: clear it. `field` is the whole
+/// box, border included; the × sits 8 px inside its right edge.
 fn clear_glyph(ui: &mut egui::Ui, palette: Theme, field: egui::Rect) -> egui::Response {
     const ARM: f32 = 4.0;
     let center = egui::pos2(field.right() - 8.0 - ARM, field.center().y);

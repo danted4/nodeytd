@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **× in the link box:** it sits 8 px inside the box's right edge, like torrenter's file icon, instead of about 32 px in.
+
 ## 4.1.2
 
 - **The macOS app updates itself:** with auto-update on, `ytd.app` now installs a new version in place, as torrenter does: it replaces the binary inside the app, stamps the new version into `Info.plist` and signs the app again. Before, the app only showed "ytd X is available". 4.1.0 and 4.1.1 still only announce it, so install 4.1.2 by hand once. An install that can't write its own folder (an app run from Downloads before it is moved, a read-only volume, or a user without write access) still only announces a new version. If the app can't be signed again, the update says so and where to download it.
